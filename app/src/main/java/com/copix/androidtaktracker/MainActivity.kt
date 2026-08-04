@@ -5,33 +5,33 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.IconButton
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Menu
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -70,10 +70,11 @@ class MainActivity : ComponentActivity() {
                     mutableStateOf(!prefs.getBoolean("onboarding_done", false))
                 }
                 var showQr by remember { mutableStateOf(false) }
+                var callsignDone by remember { mutableStateOf(false) }
+                var statusMessage by remember { mutableStateOf<String?>(null) }
                 val snackbar = remember { SnackbarHostState() }
                 val scope = rememberCoroutineScope()
 
-                // Handle deep links from OS camera / external apps
                 androidx.compose.runtime.DisposableEffect(Unit) {
                     val listener = Consumer<Intent> { intent ->
                         intent.dataString?.let { uri ->
@@ -95,7 +96,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val config by host.config.collectAsState()
-                val needsCallsign = IdentityResolver.userNeedsSetup(config)
+                val needsCallsign = !callsignDone && IdentityResolver.userNeedsSetup(config)
 
                 when {
                     showOnboarding -> OnboardingScreen {
@@ -112,13 +113,19 @@ class MainActivity : ComponentActivity() {
                         },
                         onCancel = { showQr = false },
                     )
-                    needsCallsign -> CallsignSetupScreen(host) {
-                        scope.launch { snackbar.showSnackbar("Callsign saved") }
-                    }
+                    needsCallsign -> CallsignSetupScreen(
+                        host = host,
+                        onDone = { saved ->
+                            callsignDone = true
+                            if (saved) statusMessage = "Callsign saved"
+                        },
+                    )
                     else -> AppShell(
                         host = host,
                         snackbar = snackbar,
                         onOpenQr = { showQr = true },
+                        pendingMessage = statusMessage,
+                        onPendingMessageShown = { statusMessage = null },
                     )
                 }
             }
@@ -132,9 +139,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CallsignSetupScreen(host: TrackingHost, onDone: () -> Unit) {
+private fun CallsignSetupScreen(host: TrackingHost, onDone: (saved: Boolean) -> Unit) {
     val config by host.config.collectAsState()
     var callsign by remember { mutableStateOf(config.userIdentity.callsign) }
+    var error by remember { mutableStateOf<String?>(null) }
     Column(
         Modifier
             .fillMaxSize()
@@ -151,20 +159,25 @@ private fun CallsignSetupScreen(host: TrackingHost, onDone: () -> Unit) {
             onValueChange = { callsign = it },
             label = { Text("My callsign") },
             modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
         )
+        error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
         Button(
             enabled = callsign.isNotBlank(),
             onClick = {
-                host.saveConfig {
+                val ok = host.saveConfig {
                     it.userIdentity.callsign = callsign.trim()
                     it.userIdentity.setupPromptDismissed = true
                 }
-                onDone()
+                if (ok) onDone(true)
+                else error = "Could not save (settings locked?)."
             },
         ) { Text("Save") }
         TextButton(onClick = {
             host.saveConfig { it.userIdentity.setupPromptDismissed = true }
-            onDone()
+            onDone(false)
         }) { Text("Skip for now") }
     }
 }
@@ -175,11 +188,20 @@ private fun AppShell(
     host: TrackingHost,
     snackbar: SnackbarHostState,
     onOpenQr: () -> Unit,
+    pendingMessage: String? = null,
+    onPendingMessageShown: () -> Unit = {},
 ) {
     var section by remember { mutableStateOf(SettingsSection.Status) }
     val wide = LocalConfiguration.current.screenWidthDp >= 700
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    androidx.compose.runtime.LaunchedEffect(pendingMessage) {
+        if (!pendingMessage.isNullOrBlank()) {
+            snackbar.showSnackbar(pendingMessage)
+            onPendingMessageShown()
+        }
+    }
 
     val navList: @Composable () -> Unit = {
         LazyColumn(Modifier.padding(8.dp)) {

@@ -224,6 +224,10 @@ class ConfigStore(
         }
     }
 
+    /** Deep copy via serialize/deserialize so callers never mutate the live StateFlow value in place. */
+    fun deepCopy(config: AppConfig): AppConfig =
+        json.decodeFromString(AppConfig.serializer(), json.encodeToString(AppConfig.serializer(), config))
+
     fun save(config: AppConfig) {
         ensureDirectories()
         config.ensureIdentityDefaults(deviceNameProvider())

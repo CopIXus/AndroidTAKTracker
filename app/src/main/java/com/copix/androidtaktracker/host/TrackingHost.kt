@@ -6,6 +6,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.provider.Settings
@@ -199,10 +200,12 @@ class TrackingHost private constructor(private val appContext: Context) {
             log.warn("Config", "Settings locked — edit rejected.")
             return false
         }
-        val cfg = _config.value
+        // Deep-copy first: mutating the StateFlow-held data class in place + assigning an equal
+        // reload is ignored by MutableStateFlow (equality), which left the callsign screen stuck.
+        val cfg = store.deepCopy(_config.value)
         mutate(cfg)
         store.save(cfg)
-        _config.value = ensureDeviceUid(store.load())
+        _config.value = ensureDeviceUid(store.deepCopy(cfg))
         applyLogLevel(_config.value)
         scope.launch { applyRuntime() }
         reporting.noteIdentityChanged()
@@ -280,6 +283,15 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     suspend fun downloadAndInstallUpdate(): String {
         if (mdm.mdmPresent.value) return "Auto-update disabled under MDM — update via your EMM."
+        if (Build.VERSION.SDK_INT >= 26 && !appContext.packageManager.canRequestPackageInstalls()) {
+            appContext.startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:${appContext.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+            return "Allow “Install unknown apps” for AndroidTAKTracker, then tap Download & install again."
+        }
         val check = _lastUpdate.value ?: updates.check().also { _lastUpdate.value = it }
         if (!check.updateAvailable || check.downloadUrl.isNullOrBlank()) {
             return check.error ?: "No update available."

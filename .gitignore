@@ -1,0 +1,57 @@
+﻿# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+build/
+
+# Gradle
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+
+# Local configuration (SDK path, secrets)
+local.properties
+*.local.json
+.env
+.env.*
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+local.properties.note
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / certs / operational material
+*.p12
+*.pfx
+*.pem
+*.key
+secrets/
+**/secrets/
+**/softcert/
+**/SoftCert/
+
+# Logs / dumps
+*.log
+gps-dumps/

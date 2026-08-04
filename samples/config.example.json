@@ -1,0 +1,51 @@
+{
+  "deviceUid": "ANDROIDTAKTRACKER-EXAMPLE",
+  "applyRemoteIdentityFromPortal": true,
+  "servers": [
+    {
+      "id": "example-server",
+      "displayName": "Example TAK",
+      "host": "tak.example.com",
+      "port": 8089,
+      "protocol": "ssl",
+      "enabled": true,
+      "username": "USER"
+    }
+  ],
+  "userIdentity": {
+    "callsign": "CALLSIGN.att",
+    "team": "Cyan",
+    "role": "Team Member",
+    "cotType": "a-f-G-U-C-I"
+  },
+  "computerIdentity": {
+    "callsign": "ANDROID-TRACKER",
+    "team": "Cyan",
+    "role": "Team Member",
+    "cotType": "a-f-G-U-C-I"
+  },
+  "reporting": {
+    "strategy": "Dynamic",
+    "stationaryIntervalSeconds": 30,
+    "movingIntervalSeconds": 5
+  },
+  "gps": {
+    "sourcePriority": "Windows",
+    "holdLastFixSeconds": 120,
+    "networkIpFallbackEnabled": true
+  },
+  "meshSa": {
+    "enabled": false,
+    "mode": "OnlyWhenDisconnected",
+    "multicastAddress": "239.2.3.1",
+    "multicastPort": 6969
+  },
+  "atak": {
+    "deferToAtak": "WhenRunning"
+  },
+  "updates": {
+    "releasesApiUrl": "https://api.github.com/repos/CopIXus/AndroidTAKTracker/releases/latest",
+    "checkOnStart": false,
+    "autoInstall": false
+  }
+}

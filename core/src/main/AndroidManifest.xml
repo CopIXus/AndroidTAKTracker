@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Minimal manifest for the :core library module. All platform permissions (location,
+    foreground service, boot receiver, network) belong to the `app` module's manifest, since
+    core has no Activities/Services/Receivers of its own — it is pure Kotlin business logic.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

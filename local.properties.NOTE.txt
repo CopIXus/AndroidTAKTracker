@@ -1,0 +1,2 @@
+﻿local.properties is written in the working tree for local SDK sync but is listed in .gitignore.
+Copy or recreate sdk.dir for each machine. Never commit real TAK hosts or tokens.

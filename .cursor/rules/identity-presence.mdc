@@ -1,0 +1,39 @@
+﻿---
+description: Callsign identity and TAK Server/Portal presence PLI behavior (Android)
+alwaysApply: true
+---
+
+# Identity and TAK presence
+
+AndroidTAKTracker is tracking-only. Map clients (CloudTAK / ATAK / WinTAK) show PLI from CoT. TAK Server and Portal connection lists identify a TLS session from the **first usable self-SA (PLI)**.
+
+## Callsign sources
+
+1. **Operator callsign** — what the user sets under Identity / enrollment (`callsign` in enroll QR or settings).
+2. **MDM / managed config** — Headwind (or equivalent) may push callsign, team, role, and server settings; respect settings lock.
+3. **Device label (optional remarks only)** — never put a **bare device hostname** in CoT `remarks` (some Portal UIs mis-read that as the callsign). Optional remarks must be prefixed (`Device: {name}`). Default include-device-name-in-remarks is **off**.
+
+## Presence announce (must keep working)
+
+- After TAK connect: delay briefly, then announce presence so identity bindings can win the race before the first PLI.
+- When callsign / team / role changes: re-announce so Portal/Server labels update.
+- Self-SA must include ATAK-shaped fields: `contact@callsign` + `endpoint=*:-1:stcp`, `uid@Droid` (= callsign), `__group`, `takv platform=AndroidTAKTracker`, `precisionlocation`.
+- Reply to server `t-x-c-t` with `t-x-c-t-r`.
+- Device UID: `ANDROID-AndroidTAKTracker-*` for this app. Do **not** spoof `WINDOWS-*`, bare `ANDROID-*` ATAK UIDs, or `ATAK-CIV`.
+
+## Client certs (Android)
+
+Load client `.p12` via Android Keystore / `KeyStore.getInstance("PKCS12")` for mTLS. Prefer hardware-backed keys when available. Never embed certs or passphrases in the repo.
+
+## Portal vs map
+
+- CloudTAK/ATAK maps use `contact@callsign` — that is the source of truth for “am I tracking?”
+- Portal Connected Users may omit raw SSL clients or lag on first-PLI identity; that is often Portal-side.
+
+## ATAK coexistence
+
+Honor **ATAK-DEFER**: when a full map client should own presence on the same device, pause or defer AndroidTAKTracker PLI per settings/MDM.
+
+## Secrets
+
+Follow `no-tak-secrets.mdc`. No real hosts, tokens, enroll URLs, or certs in the repo.

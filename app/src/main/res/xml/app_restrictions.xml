@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+    <restriction
+        android:key="enrollUrl"
+        android:title="@string/restriction_enroll_url_title"
+        android:description="@string/restriction_enroll_url_desc"
+        android:restrictionType="string" />
+    <restriction
+        android:key="serverHost"
+        android:title="@string/restriction_server_host_title"
+        android:restrictionType="string" />
+    <restriction
+        android:key="serverPort"
+        android:title="@string/restriction_server_port_title"
+        android:restrictionType="string"
+        android:defaultValue="8089" />
+    <restriction
+        android:key="serverProtocol"
+        android:title="@string/restriction_server_protocol_title"
+        android:restrictionType="string"
+        android:defaultValue="ssl" />
+    <restriction
+        android:key="callsign"
+        android:title="@string/restriction_callsign_title"
+        android:restrictionType="string" />
+    <restriction
+        android:key="team"
+        android:title="@string/restriction_team_title"
+        android:restrictionType="string"
+        android:defaultValue="Cyan" />
+    <restriction
+        android:key="role"
+        android:title="@string/restriction_role_title"
+        android:restrictionType="string"
+        android:defaultValue="Team Member" />
+    <restriction
+        android:key="reportingStrategy"
+        android:title="@string/restriction_reporting_strategy_title"
+        android:restrictionType="string"
+        android:defaultValue="Dynamic" />
+    <restriction
+        android:key="deferToAtak"
+        android:title="@string/restriction_defer_to_atak_title"
+        android:restrictionType="string"
+        android:defaultValue="WhenRunning" />
+    <restriction
+        android:key="pause"
+        android:title="@string/restriction_pause_title"
+        android:restrictionType="string"
+        android:defaultValue="false" />
+</restrictions>

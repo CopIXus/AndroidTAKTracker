@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AndroidTAKTracker</string>
+
+    <!-- Android Enterprise managed configuration labels -->
+    <string name="restriction_enroll_url_title">Enrollment URL</string>
+    <string name="restriction_enroll_url_desc">opentaktracker:// or tak:// enroll URL</string>
+    <string name="restriction_server_host_title">Server host</string>
+    <string name="restriction_server_port_title">Server port</string>
+    <string name="restriction_server_protocol_title">Protocol</string>
+    <string name="restriction_callsign_title">Callsign</string>
+    <string name="restriction_team_title">Team</string>
+    <string name="restriction_role_title">Role</string>
+    <string name="restriction_reporting_strategy_title">Reporting strategy</string>
+    <string name="restriction_defer_to_atak_title">Defer to ATAK</string>
+    <string name="restriction_pause_title">Remote pause</string>
+</resources>

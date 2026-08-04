@@ -1,0 +1,19 @@
+﻿---
+description: Keep feature IDs aligned with WinTAKTracker sibling repo
+alwaysApply: true
+---
+
+# Feature parity with WinTAKTracker
+
+AndroidTAKTracker is the Android sibling of WinTAKTracker. Shared **Feature IDs** live in `docs/feature-parity.md`.
+
+## Rules
+
+- Do not rename or remove a Feature ID without updating both repos.
+- New cross-product capabilities need a new Feature ID row in both matrices.
+- **VIDEO** on Android is **N/A** — document ICU VideoStreamer (or successor) as the companion; do not reintroduce in-app video without an explicit product decision.
+- CI workflow `parity-drift.yml` compares Feature IDs against `CopIXus/WinTAKTracker` — keep the script green.
+
+## Status vocabulary
+
+Use Yes / Partial / Planned / N/A consistently in the parity table.

@@ -1,0 +1,191 @@
+package com.copix.androidtaktracker
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.dp
+import androidx.core.util.Consumer
+import com.copix.androidtaktracker.host.TrackingHost
+import com.copix.androidtaktracker.onboarding.OnboardingScreen
+import com.copix.androidtaktracker.service.TrackingForegroundService
+import com.copix.androidtaktracker.ui.QrScanScreen
+import com.copix.androidtaktracker.ui.SettingsSection
+import com.copix.androidtaktracker.ui.screens.SectionContent
+import com.copix.androidtaktracker.ui.theme.AndroidTakTrackerTheme
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+    private var pendingDeepLink: String? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        TrackingForegroundService.start(this)
+        pendingDeepLink = intent?.dataString
+
+        val prefs = getSharedPreferences("att_ui", MODE_PRIVATE)
+        setContent {
+            AndroidTakTrackerTheme {
+                val host = remember { TrackingHost.get(this) }
+                var showOnboarding by remember {
+                    mutableStateOf(!prefs.getBoolean("onboarding_done", false))
+                }
+                var showQr by remember { mutableStateOf(false) }
+                val snackbar = remember { SnackbarHostState() }
+                val scope = rememberCoroutineScope()
+
+                // Handle deep links from OS camera / external apps
+                androidx.compose.runtime.DisposableEffect(Unit) {
+                    val listener = Consumer<Intent> { intent ->
+                        intent.dataString?.let { uri ->
+                            scope.launch {
+                                val r = host.enroll(uri)
+                                snackbar.showSnackbar(r.message)
+                            }
+                        }
+                    }
+                    addOnNewIntentListener(listener)
+                    pendingDeepLink?.let { uri ->
+                        scope.launch {
+                            val r = host.enroll(uri)
+                            snackbar.showSnackbar(r.message)
+                            pendingDeepLink = null
+                        }
+                    }
+                    onDispose { removeOnNewIntentListener(listener) }
+                }
+
+                when {
+                    showOnboarding -> OnboardingScreen {
+                        prefs.edit().putBoolean("onboarding_done", true).apply()
+                        showOnboarding = false
+                    }
+                    showQr -> QrScanScreen(
+                        onResult = { raw ->
+                            showQr = false
+                            scope.launch {
+                                val r = host.enroll(raw)
+                                snackbar.showSnackbar(r.message)
+                            }
+                        },
+                        onCancel = { showQr = false },
+                    )
+                    else -> AppShell(
+                        host = host,
+                        snackbar = snackbar,
+                        onOpenQr = { showQr = true },
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppShell(
+    host: TrackingHost,
+    snackbar: SnackbarHostState,
+    onOpenQr: () -> Unit,
+) {
+    var section by remember { mutableStateOf(SettingsSection.Status) }
+    val wide = LocalConfiguration.current.screenWidthDp >= 700
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+
+    val navList: @Composable () -> Unit = {
+        LazyColumn(Modifier.padding(8.dp)) {
+            items(SettingsSection.entries) { item ->
+                NavigationDrawerItem(
+                    label = { Text(item.title) },
+                    selected = section == item,
+                    onClick = {
+                        section = item
+                        scope.launch { drawerState.close() }
+                    },
+                    icon = { Icon(item.icon, contentDescription = null) },
+                    modifier = Modifier.padding(vertical = 2.dp),
+                )
+            }
+        }
+    }
+
+    if (wide) {
+        Scaffold(
+            topBar = { TopAppBar(title = { Text(section.title) }) },
+            snackbarHost = { SnackbarHost(snackbar) },
+        ) { pad ->
+            Row(Modifier.padding(pad).fillMaxSize()) {
+                androidx.compose.foundation.layout.Box(Modifier.width(260.dp)) { navList() }
+                androidx.compose.foundation.layout.Box(
+                    Modifier
+                        .weight(1f)
+                        .padding(16.dp),
+                ) {
+                    SectionContent(section, host, onOpenQr)
+                }
+            }
+        }
+    } else {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                androidx.compose.material3.ModalDrawerSheet { navList() }
+            },
+        ) {
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = { Text(section.title) },
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Outlined.Menu, contentDescription = "Menu")
+                            }
+                        },
+                    )
+                },
+                snackbarHost = { SnackbarHost(snackbar) },
+            ) { pad ->
+                androidx.compose.foundation.layout.Box(Modifier.padding(pad).padding(16.dp).fillMaxSize()) {
+                    SectionContent(section, host, onOpenQr)
+                }
+            }
+        }
+    }
+}

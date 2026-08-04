@@ -1,0 +1,11 @@
+﻿# Example enrollment / connection strings (FAKE hosts only)
+# Never commit real TAK servers, tokens, callsigns, or certs.
+
+# OpenTAK Tracker / Portal style
+opentaktracker://enroll?host=tak.example.com&username=USER&token=TOKEN&callsign=CALLSIGN&team=Cyan&role=Team%20Member
+
+# ATAK-style enroll deep link (example shape)
+tak://com.atakmap.app/enroll?host=tak.example.com&username=USER&token=TOKEN
+
+# CSV-style server row (name, host, port, protocol)
+ExampleServer,tak.example.com,8089,ssl

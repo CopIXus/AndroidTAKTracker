@@ -46,6 +46,29 @@ class MdmConfigBridge(
     }
 
     var onConfigUpdated: (() -> Unit)? = null
+    /** Invoked when a Headwind `attracker-config` push carries an enroll URL / JSON fragment. */
+    var onPushEnrollUrl: ((String) -> Unit)? = null
+
+    private val pushReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            val action = intent?.action.orEmpty()
+            when {
+                action.endsWith("attracker-pause") -> {
+                    pauseRequested = true
+                    log.warn("MDM", "Remote pause via push broadcast.")
+                    onConfigUpdated?.invoke()
+                }
+                action.endsWith("attracker-config") -> {
+                    val payload = intent?.getStringExtra("payload")
+                        ?: intent?.getStringExtra("message")
+                        ?: intent?.getStringExtra("data")
+                        ?: ""
+                    handleConfigPushPayload(payload)
+                }
+                else -> onConfigUpdated?.invoke()
+            }
+        }
+    }
 
     fun start() {
         val filter = IntentFilter(Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED)
@@ -61,14 +84,31 @@ class MdmConfigBridge(
             hwFilter.addAction("com.hmdm.push.attracker-config")
             hwFilter.addAction("com.hmdm.push.attracker-pause")
             if (Build.VERSION.SDK_INT >= 33) {
-                context.registerReceiver(restrictionsReceiver, hwFilter, Context.RECEIVER_NOT_EXPORTED)
+                context.registerReceiver(pushReceiver, hwFilter, Context.RECEIVER_NOT_EXPORTED)
             } else {
                 @Suppress("UnspecifiedRegisterReceiverFlag")
-                context.registerReceiver(restrictionsReceiver, hwFilter)
+                context.registerReceiver(pushReceiver, hwFilter)
             }
         } catch (_: Exception) { /* ignore */ }
         detectHeadwind()
         tryRegisterHeadwindPushHandler()
+    }
+
+    private fun handleConfigPushPayload(payload: String) {
+        if (payload.isBlank()) {
+            onConfigUpdated?.invoke()
+            return
+        }
+        val trimmed = payload.trim()
+        when {
+            trimmed.contains("://") || trimmed.contains(',') -> onPushEnrollUrl?.invoke(trimmed)
+            trimmed.startsWith("{") -> {
+                val enroll = Regex(""""enrollUrl"\s*:\s*"([^"]+)"""").find(trimmed)?.groupValues?.get(1)
+                if (!enroll.isNullOrBlank()) onPushEnrollUrl?.invoke(enroll)
+                else onConfigUpdated?.invoke()
+            }
+            else -> onConfigUpdated?.invoke()
+        }
     }
 
     /**
@@ -98,7 +138,7 @@ class MdmConfigBridge(
                         }
                         type.contains("attracker-config", ignoreCase = true) || payload.isNotBlank() -> {
                             log.info("MDM", "Headwind config push received.")
-                            onConfigUpdated?.invoke()
+                            handleConfigPushPayload(payload)
                         }
                     }
                 }
@@ -117,6 +157,7 @@ class MdmConfigBridge(
 
     fun stop() {
         try { context.unregisterReceiver(restrictionsReceiver) } catch (_: Exception) {}
+        try { context.unregisterReceiver(pushReceiver) } catch (_: Exception) {}
     }
 
     /**
@@ -144,7 +185,16 @@ class MdmConfigBridge(
             val port = keys["serverPort"]?.toIntOrNull() ?: 8089
             val protocol = keys["serverProtocol"] ?: "ssl"
             val existing = config.servers.firstOrNull { it.host.equals(host, true) }
-            if (existing == null) {
+            val user = keys["username"]
+            val token = keys["token"]
+            if (existing == null && !user.isNullOrBlank() && !token.isNullOrBlank()) {
+                // Full enroll mints/stores client cert + token via Marti CSR when possible.
+                val enroll =
+                    "opentaktracker://enroll?host=$host&username=$user&token=$token" +
+                        "&port=$port&protocol=$protocol"
+                scope.launch(Dispatchers.IO) { enrollment.applyAsync(enroll, config) }
+                changed = true
+            } else if (existing == null) {
                 config.servers.add(
                     ServerProfile(
                         id = UUID.randomUUID().toString().replace("-", ""),
@@ -152,10 +202,9 @@ class MdmConfigBridge(
                         host = host,
                         port = port,
                         protocol = protocol,
-                        username = keys["username"],
+                        username = user,
                     ),
                 )
-                keys["token"]?.let { /* stored by enroll path when present */ }
                 changed = true
             } else {
                 if (existing.port != port) { existing.port = port; changed = true }

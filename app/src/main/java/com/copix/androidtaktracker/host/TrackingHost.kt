@@ -1,20 +1,32 @@
 package com.copix.androidtaktracker.host
 
 import android.content.Context
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.BatteryManager
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.FileProvider
 import com.copix.androidtaktracker.BuildConfig
 import com.copix.androidtaktracker.atak.AtakCoexistence
 import com.copix.androidtaktracker.config.AndroidEncryptedSecretStore
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ConfigStore
 import com.copix.androidtaktracker.core.config.ServerProfile
+import com.copix.androidtaktracker.core.cot.CotEventBuilder
+import com.copix.androidtaktracker.core.cot.GpsFix
+import com.copix.androidtaktracker.core.cot.GpsSourceKind
+import com.copix.androidtaktracker.core.diagnostics.StatusExporter
+import com.copix.androidtaktracker.core.identity.IdentityResolver
 import com.copix.androidtaktracker.core.mesh.MeshSaBroadcaster
 import com.copix.androidtaktracker.core.portal.DeviceProfileSync
 import com.copix.androidtaktracker.core.portal.ServerCertificateProvider
 import com.copix.androidtaktracker.core.reporting.ReportingEngine
 import com.copix.androidtaktracker.core.tak.ClientCertificateMaterial
+import com.copix.androidtaktracker.core.tak.EnrollmentApplyResult
 import com.copix.androidtaktracker.core.tak.EnrollmentService
 import com.copix.androidtaktracker.core.tak.ServerCredentialProvider
 import com.copix.androidtaktracker.core.tak.TakConnectionListener
@@ -36,6 +48,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.time.Duration
+import java.time.Instant
 
 class TrackingHost private constructor(private val appContext: Context) {
     private val store = ConfigStore(
@@ -117,10 +131,13 @@ class TrackingHost private constructor(private val appContext: Context) {
     private val _lastUpdate = MutableStateFlow<UpdateCheckResult?>(null)
     val lastUpdate: StateFlow<UpdateCheckResult?> = _lastUpdate
 
-    private val _settingsUnlocked = MutableStateFlow(true)
+    private val _settingsUnlocked = MutableStateFlow(store.readSecret("settings-lock").isNullOrBlank())
     val settingsUnlocked: StateFlow<Boolean> = _settingsUnlocked
 
     val lastPliEpochMs: Long get() = reporting.lastPliEpochMs
+    val isSettingsLocked: Boolean get() = !store.readSecret("settings-lock").isNullOrBlank()
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     init {
         store.save(_config.value)
@@ -133,6 +150,9 @@ class TrackingHost private constructor(private val appContext: Context) {
             override fun onServerConnected(profile: ServerProfile) {
                 reporting.requestAsap()
                 scope.launch {
+                    // MDM owns identity when those keys are managed — skip Portal overwrite.
+                    val managed = mdm.managedKeys.value
+                    if ("callsign" in managed || "team" in managed || "role" in managed) return@launch
                     portal.trySync(profile, _config.value) { cfg ->
                         store.save(cfg)
                         _config.value = ensureDeviceUid(store.load())
@@ -146,6 +166,12 @@ class TrackingHost private constructor(private val appContext: Context) {
     fun start() {
         mdm.start()
         mdm.onConfigUpdated = { scope.launch { reloadFromMdm() } }
+        mdm.onPushEnrollUrl = { url ->
+            scope.launch {
+                enroll(url)
+            }
+        }
+        registerNetworkCallback()
         scope.launch {
             reloadFromMdm()
             applyRuntime()
@@ -161,13 +187,18 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     fun stop() {
         reporting.stop()
+        unregisterNetworkCallback()
         scope.launch { tak.stop() }
         gps.stop()
         meshMulticast.stop()
         mdm.stop()
     }
 
-    fun saveConfig(mutate: (AppConfig) -> Unit) {
+    fun saveConfig(mutate: (AppConfig) -> Unit): Boolean {
+        if (!_settingsUnlocked.value && isSettingsLocked) {
+            log.warn("Config", "Settings locked — edit rejected.")
+            return false
+        }
         val cfg = _config.value
         mutate(cfg)
         store.save(cfg)
@@ -175,23 +206,134 @@ class TrackingHost private constructor(private val appContext: Context) {
         applyLogLevel(_config.value)
         scope.launch { applyRuntime() }
         reporting.noteIdentityChanged()
+        return true
     }
 
     fun persist() {
         store.save(_config.value)
     }
 
-    suspend fun enroll(input: String) = enrollment.applyAsync(input, _config.value).also {
-        if (it.success) {
-            store.save(_config.value)
+    suspend fun enroll(input: String): EnrollmentApplyResult {
+        if (!_settingsUnlocked.value && isSettingsLocked) {
+            return EnrollmentApplyResult(false, "Settings are locked.")
+        }
+        return enrollment.applyAsync(input, _config.value).also {
+            if (it.success) {
+                store.save(_config.value)
+                _config.value = ensureDeviceUid(store.load())
+                applyRuntime()
+                reporting.noteIdentityChanged()
+            }
+        }
+    }
+
+    fun importSoftCertZip(bytes: ByteArray): EnrollmentApplyResult {
+        if (!_settingsUnlocked.value && isSettingsLocked) {
+            return EnrollmentApplyResult(false, "Settings are locked.")
+        }
+        val r = enrollment.importSoftCertZip(bytes, _config.value)
+        if (r.success) {
             _config.value = ensureDeviceUid(store.load())
-            applyRuntime()
+            scope.launch { applyRuntime() }
             reporting.noteIdentityChanged()
         }
+        return r
     }
 
     fun setPaused(value: Boolean) {
         _paused.value = value
+    }
+
+    fun exportStatusJson(): String = StatusExporter.export(
+        config = _config.value,
+        serverStates = tak.statuses(),
+        fix = gps.fix.value,
+        paused = _paused.value || mdm.isRemotePauseRequested(),
+        deferringToAtak = atak.shouldDefer(_config.value.atak.deferToAtak),
+        appVersion = BuildConfig.VERSION_NAME,
+        lastPliEpochMs = reporting.lastPliEpochMs,
+    )
+
+    fun sendTestMeshSa(): Boolean {
+        val cfg = _config.value
+        val active = IdentityResolver.resolve(cfg, Build.MODEL ?: "Android")
+        val fix = gps.fix.value ?: GpsFix(
+            latitude = 0.0,
+            longitude = 0.0,
+            timestamp = Instant.now(),
+            source = GpsSourceKind.NETWORK_IP,
+            isHeld = true,
+        )
+        val identity = CotEventBuilder.fromActiveIdentity(
+            cfg, active, null, readBattery(), Build.MODEL,
+        ).copy(version = BuildConfig.VERSION_NAME)
+        val xml = CotEventBuilder.build(
+            fix,
+            identity,
+            Duration.ofSeconds(60),
+            cfg.gps.courseOffsetDegrees,
+            Build.MODEL,
+            "Android ${Build.VERSION.RELEASE}",
+        )
+        return mesh.trySend(xml)
+    }
+
+    suspend fun downloadAndInstallUpdate(): String {
+        if (mdm.mdmPresent.value) return "Auto-update disabled under MDM — update via your EMM."
+        val check = _lastUpdate.value ?: updates.check().also { _lastUpdate.value = it }
+        if (!check.updateAvailable || check.downloadUrl.isNullOrBlank()) {
+            return check.error ?: "No update available."
+        }
+        val bytes = updates.download(check.downloadUrl!!) ?: return "Download failed."
+        if (!updates.verifySha256(bytes, check.sha256Expected)) return "SHA-256 mismatch — install aborted."
+        val dir = File(appContext.cacheDir, "updates").also { it.mkdirs() }
+        val apk = File(dir, "AndroidTAKTracker.apk")
+        apk.writeBytes(bytes)
+        val uri = FileProvider.getUriForFile(
+            appContext,
+            "${appContext.packageName}.fileprovider",
+            apk,
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        appContext.startActivity(intent)
+        return "Opening installer for ${check.latestVersion}."
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                scope.launch { tak.forceReconnect() }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    scope.launch { tak.forceReconnect() }
+                }
+            }
+        }
+        networkCallback = cb
+        try {
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                cb,
+            )
+        } catch (ex: Exception) {
+            log.warn("Net", "Network callback register failed: ${ex.javaClass.simpleName}")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        networkCallback?.let {
+            try { cm.unregisterNetworkCallback(it) } catch (_: Exception) {}
+        }
+        networkCallback = null
     }
 
     fun unlockSettings(password: String?): Boolean {

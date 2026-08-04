@@ -34,6 +34,8 @@ interface UpdateService {
     val currentVersion: String
     suspend fun check(): UpdateCheckResult
     suspend fun verifySha256(bytes: ByteArray, expected: String?): Boolean
+    /** Download APK bytes from [url]; caller verifies SHA-256 and installs. */
+    suspend fun download(url: String): ByteArray?
 }
 
 /** GitHub Releases updater for CopIXus/AndroidTAKTracker (APK asset named AndroidTAKTracker.apk). */
@@ -255,6 +257,26 @@ class GitHubUpdateService(
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         val actual = digest.joinToString("") { "%02x".format(it) }
         return actual.equals(expected, ignoreCase = true)
+    }
+
+    override suspend fun download(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            http.newCall(
+                Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "AndroidTAKTracker/0.1")
+                    .build(),
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    log.warn("Update", "APK download HTTP ${resp.code}")
+                    return@withContext null
+                }
+                resp.body?.bytes()
+            }
+        } catch (ex: Exception) {
+            log.warn("Update", "APK download failed: ${ex.javaClass.simpleName}")
+            null
+        }
     }
 
     private fun parseReleases(body: String): List<GitHubRelease> = try {

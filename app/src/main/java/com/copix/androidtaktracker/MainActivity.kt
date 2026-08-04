@@ -1,4 +1,4 @@
-package com.copix.androidtaktracker
+﻿package com.copix.androidtaktracker
 
 import android.content.Intent
 import android.os.Bundle
@@ -26,7 +26,14 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.core.util.Consumer
+import com.copix.androidtaktracker.core.identity.IdentityResolver
 import com.copix.androidtaktracker.host.TrackingHost
 import com.copix.androidtaktracker.onboarding.OnboardingScreen
 import com.copix.androidtaktracker.service.TrackingForegroundService
@@ -86,6 +94,9 @@ class MainActivity : ComponentActivity() {
                     onDispose { removeOnNewIntentListener(listener) }
                 }
 
+                val config by host.config.collectAsState()
+                val needsCallsign = IdentityResolver.userNeedsSetup(config)
+
                 when {
                     showOnboarding -> OnboardingScreen {
                         prefs.edit().putBoolean("onboarding_done", true).apply()
@@ -101,6 +112,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onCancel = { showQr = false },
                     )
+                    needsCallsign -> CallsignSetupScreen(host) {
+                        scope.launch { snackbar.showSnackbar("Callsign saved") }
+                    }
                     else -> AppShell(
                         host = host,
                         snackbar = snackbar,
@@ -114,6 +128,44 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+    }
+}
+
+@Composable
+private fun CallsignSetupScreen(host: TrackingHost, onDone: () -> Unit) {
+    val config by host.config.collectAsState()
+    var callsign by remember { mutableStateOf(config.userIdentity.callsign) }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Set your callsign", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            "This appears on TAK maps as your PLI label. Portal pushes append .att automatically.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        OutlinedTextField(
+            value = callsign,
+            onValueChange = { callsign = it },
+            label = { Text("My callsign") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            enabled = callsign.isNotBlank(),
+            onClick = {
+                host.saveConfig {
+                    it.userIdentity.callsign = callsign.trim()
+                    it.userIdentity.setupPromptDismissed = true
+                }
+                onDone()
+            },
+        ) { Text("Save") }
+        TextButton(onClick = {
+            host.saveConfig { it.userIdentity.setupPromptDismissed = true }
+            onDone()
+        }) { Text("Skip for now") }
     }
 }
 

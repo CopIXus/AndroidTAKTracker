@@ -15,9 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.time.Duration
 import java.time.Instant
-import kotlin.math.abs
 
 class ReportingEngine(
     private val log: RedactedLogger,
@@ -86,7 +84,11 @@ class ReportingEngine(
             if (!asap && !identityDirty) return
         }
 
-        val intervalSec = computeIntervalSeconds(config, fix)
+        val rate = ReportingRateFactory.create(config.reporting)
+        val path = if (connected) ReportingPath.RELIABLE else ReportingPath.UNRELIABLE
+        val speedMph = fix?.speedMph ?: 0.0
+        val interval = rate.getInterval(path, speedMph)
+        val intervalSec = interval.seconds.coerceAtLeast(5)
         val due = asap || identityDirty ||
             lastPliEpochMs == 0L ||
             System.currentTimeMillis() - lastPliEpochMs >= intervalSec * 1000L
@@ -102,7 +104,7 @@ class ReportingEngine(
         )
         val active = IdentityResolver.resolve(config, deviceModel())
         val battery = batteryPercent()
-        val stale = Duration.ofSeconds((intervalSec * 3L).coerceAtLeast(30))
+        val stale = rate.getStale(interval)
         val model = deviceModel()
         val os = osVersion()
 
@@ -131,27 +133,8 @@ class ReportingEngine(
             lastAlt = useFix.altitudeMeters ?: 0.0
         }
 
-        val speedMph = fix?.speedMph ?: 0.0
-        val alt = fix?.altitudeMeters ?: 0.0
-        if (abs(speedMph - lastSpeedMph) > 7.0) asap = true
-        if (abs(alt - lastAlt) > 50.0) asap = true
-    }
-
-    private fun computeIntervalSeconds(config: AppConfig, fix: GpsFix?): Int {
-        val r = config.reporting
-        if (r.strategy.equals("Constant", true)) {
-            return r.constantIntervalSeconds.coerceAtLeast(5)
-        }
-        val speedMph = fix?.speedMph ?: 0.0
-        val stationary = speedMph < 1.0
-        val reliable = tak.anyConnected
-        return if (reliable) {
-            if (stationary) r.reliableStationarySeconds.coerceAtLeast(5)
-            else r.reliableMinSeconds.coerceAtLeast(5).coerceAtMost(r.reliableMaxMoveSeconds)
-        } else {
-            if (stationary) r.unreliableStationarySeconds.coerceAtLeast(5)
-            else r.unreliableMinSeconds.coerceAtLeast(5).coerceAtMost(r.unreliableMaxMoveSeconds)
-        }
+        val alt = fix?.altitudeMeters
+        if (rate.shouldReportAsap(lastAlt, alt, lastSpeedMph, speedMph)) asap = true
     }
 
     private fun shouldSendMesh(config: AppConfig, connected: Boolean): Boolean {

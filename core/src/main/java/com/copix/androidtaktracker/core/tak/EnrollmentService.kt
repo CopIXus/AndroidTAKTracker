@@ -170,31 +170,21 @@ class EnrollmentService(
         privateKey: java.security.PrivateKey,
         cn: String,
     ): String {
-        return try {
-            val clazz = Class.forName("sun.security.pkcs10.PKCS10")
-            val ctor = clazz.getConstructor(java.security.PublicKey::class.java)
-            val pkcs10 = ctor.newInstance(
-                java.security.KeyFactory.getInstance("RSA")
-                    .generatePublic(java.security.spec.X509EncodedKeySpec(publicKey)),
-            )
-            val signMethod = clazz.getMethod(
-                "encodeAndSign",
-                Class.forName("sun.security.x509.X500Name"),
-                java.security.PrivateKey::class.java,
-                String::class.java,
-            )
-            val x500 = Class.forName("sun.security.x509.X500Name")
-                .getConstructor(String::class.java)
-                .newInstance("CN=$cn")
-            signMethod.invoke(pkcs10, x500, privateKey, "SHA256withRSA")
-            val baos = java.io.ByteArrayOutputStream()
-            clazz.getMethod("print", java.io.PrintStream::class.java)
-                .invoke(pkcs10, java.io.PrintStream(baos))
-            baos.toString(Charsets.UTF_8)
-        } catch (_: Exception) {
-            val b64 = java.util.Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(publicKey)
-            "-----BEGIN CERTIFICATE REQUEST-----\n$b64\n-----END CERTIFICATE REQUEST-----\n"
+        if (java.security.Security.getProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME) == null) {
+            java.security.Security.addProvider(org.bouncycastle.jce.provider.BouncyCastleProvider())
         }
+        val pub = java.security.KeyFactory.getInstance("RSA")
+            .generatePublic(java.security.spec.X509EncodedKeySpec(publicKey))
+        val subject = org.bouncycastle.asn1.x500.X500Name("CN=$cn")
+        val builder = org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(subject, pub)
+        val signer = org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA")
+            .setProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME)
+            .build(privateKey)
+        val csr = builder.build(signer)
+        val pem = org.bouncycastle.util.io.pem.PemObject("CERTIFICATE REQUEST", csr.encoded)
+        val sw = java.io.StringWriter()
+        org.bouncycastle.util.io.pem.PemWriter(sw).use { it.writeObject(pem) }
+        return sw.toString()
     }
 
     private fun download(url: String): ByteArray? {

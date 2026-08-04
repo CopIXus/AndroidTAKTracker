@@ -3,6 +3,8 @@ package com.copix.androidtaktracker.ui.screens
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -48,7 +50,9 @@ import com.copix.androidtaktracker.core.identity.IdentityResolver
 import com.copix.androidtaktracker.core.tak.TakConnectionState
 import com.copix.androidtaktracker.host.TrackingHost
 import com.copix.androidtaktracker.ui.SettingsSection
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -117,38 +121,49 @@ private fun StatusScreen(host: TrackingHost) {
 private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
     val config by host.config.collectAsState()
     val states by host.serverStates.collectAsState()
+    val unlocked by host.settingsUnlocked.collectAsState()
     val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
     var enrollText by remember { mutableStateOf("") }
+    var manualHost by remember { mutableStateOf("") }
+    var manualPort by remember { mutableStateOf("8089") }
     var message by remember { mutableStateOf<String?>(null) }
     val managed = host.mdm.managedKeys.collectAsState().value
+    val editable = unlocked || !host.isSettingsLocked
+
+    val softCertPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }
+            message = if (bytes == null) "Could not read SoftCert ZIP."
+            else host.importSoftCertZip(bytes).message
+        }
+    }
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Blurb("Add TAK servers via QR, enrollment URL, SoftCert, or manual host. Fake hosts only in samples.")
-        if ("enrollUrl" in managed || "serverHost" in managed) {
-            ManagedBadge()
-        }
+        Blurb("Add TAK servers via QR, enrollment URL, SoftCert ZIP, or manual host. Fake hosts only in samples.")
+        if ("enrollUrl" in managed || "serverHost" in managed) ManagedBadge()
+        if (!editable) Blurb("Settings are locked — unlock under Diagnostics to edit.")
         config.servers.forEach { server ->
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             checked = server.enabled,
+                            enabled = editable,
                             onCheckedChange = { en ->
-                                host.saveConfig { c ->
-                                    c.servers.find { it.id == server.id }?.enabled = en
-                                }
+                                host.saveConfig { c -> c.servers.find { it.id == server.id }?.enabled = en }
                             },
                         )
                         Column(Modifier.weight(1f)) {
                             Text(server.displayName, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "${server.host}:${server.port} (${server.protocol})",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
+                            Text("${server.host}:${server.port} (${server.protocol})", style = MaterialTheme.typography.bodySmall)
                         }
                         Chip("Status", states[server.id]?.name ?: "—")
                     }
-                    TextButton(onClick = {
+                    TextButton(enabled = editable, onClick = {
                         host.saveConfig { c -> c.servers.removeAll { it.id == server.id } }
                     }) { Text("Remove") }
                 }
@@ -159,23 +174,54 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { enrollText = it },
             label = { Text("Enrollment URL or iTAK CSV") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = "enrollUrl" !in managed,
+            enabled = editable && "enrollUrl" !in managed,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
+            Button(enabled = editable && "enrollUrl" !in managed, onClick = {
                 scope.launch {
                     val r = host.enroll(enrollText)
                     message = r.message
                     if (r.success) enrollText = ""
                 }
             }) { Text("Apply") }
-            OutlinedButton(onClick = onOpenQr) { Text("Scan QR") }
+            OutlinedButton(enabled = editable, onClick = onOpenQr) { Text("Scan QR") }
+            OutlinedButton(enabled = editable, onClick = { softCertPicker.launch("application/zip") }) { Text("Import SoftCert") }
         }
+        OutlinedTextField(
+            value = manualHost,
+            onValueChange = { manualHost = it },
+            label = { Text("Manual host (tak.example.com)") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = editable && "serverHost" !in managed,
+        )
+        OutlinedTextField(
+            value = manualPort,
+            onValueChange = { manualPort = it },
+            label = { Text("Port") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = editable && "serverHost" !in managed,
+        )
+        Button(
+            enabled = editable && "serverHost" !in managed && manualHost.isNotBlank(),
+            onClick = {
+                host.saveConfig { c ->
+                    c.servers.add(
+                        com.copix.androidtaktracker.core.config.ServerProfile(
+                            id = java.util.UUID.randomUUID().toString().replace("-", ""),
+                            displayName = manualHost.trim(),
+                            host = manualHost.trim(),
+                            port = manualPort.toIntOrNull() ?: 8089,
+                            protocol = "ssl",
+                        ),
+                    )
+                }
+                manualHost = ""
+                message = "Server added."
+            },
+        ) { Text("Add manual server") }
         message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
     }
 }
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun IdentityScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
@@ -307,6 +353,7 @@ private fun ReportingScreen(host: TrackingHost) {
 @Composable
 private fun MeshScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
+    var testMsg by remember { mutableStateOf<String?>(null) }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
@@ -323,9 +370,14 @@ private fun MeshScreen(host: TrackingHost) {
         ) { v -> host.saveConfig { it.meshSa.mode = v } }
         Text("Multicast ${config.meshSa.multicastAddress}:${config.meshSa.multicastPort}")
         Blurb("Many Wi‑Fi APs block multicast — test with a map client on the same LAN.")
+        OutlinedButton(onClick = {
+            testMsg = if (host.sendTestMeshSa()) "Test Mesh SA sent."
+            else "Send failed (enable Mesh SA / check Wi‑Fi multicast)."
+        }) { Text("Send test Mesh SA now") }
+        host.mesh.lastInterfaceDescription?.let { Blurb("Interface: $it") }
+        testMsg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
     }
 }
-
 @Composable
 private fun CompanionsScreen() {
     val ctx = LocalContext.current
@@ -379,25 +431,65 @@ private fun StartupScreen(host: TrackingHost) {
 @Composable
 private fun DiagnosticsScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
+    val unlocked by host.settingsUnlocked.collectAsState()
+    val ctx = LocalContext.current
+    var lockPassword by remember { mutableStateOf("") }
+    var lockMsg by remember { mutableStateOf<String?>(null) }
+    val canEdit = unlocked || !host.isSettingsLocked
+
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         EnumDropdown(
             "Log level",
             config.diagnostics.logLevel,
             listOf("Debug", "Information", "Warning", "Error"),
-            true,
+            canEdit,
         ) { v -> host.saveConfig { it.diagnostics.logLevel = v } }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.diagnostics.allowInsecureTlsSoftAccept,
+                enabled = canEdit,
                 onCheckedChange = { v -> host.saveConfig { it.diagnostics.allowInsecureTlsSoftAccept = v } },
             )
             Text("Allow insecure TLS soft-accept (lab only)")
         }
         Blurb("Device UID: ${config.deviceUid}")
         Blurb("ATAK installed: ${host.atak.installed.value} · running: ${host.atak.running.value}")
+        OutlinedButton(onClick = {
+            val json = host.exportStatusJson()
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_SUBJECT, "AndroidTAKTracker status")
+                putExtra(Intent.EXTRA_TEXT, json)
+            }
+            ctx.startActivity(Intent.createChooser(send, "Export status"))
+        }) { Text("Export redacted status") }
+
+        Text("Settings lock", fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(
+            value = lockPassword,
+            onValueChange = { lockPassword = it },
+            label = { Text(if (host.isSettingsLocked && !unlocked) "Unlock password" else "New lock password") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (host.isSettingsLocked && !unlocked) {
+                Button(onClick = {
+                    lockMsg = if (host.unlockSettings(lockPassword)) {
+                        lockPassword = ""
+                        "Unlocked."
+                    } else "Incorrect password."
+                }) { Text("Unlock") }
+            } else {
+                Button(onClick = {
+                    host.setSettingsLock(lockPassword.takeIf { it.isNotBlank() })
+                    lockPassword = ""
+                    lockMsg = if (host.isSettingsLocked) "Settings locked." else "Settings lock cleared."
+                }) { Text(if (lockPassword.isBlank()) "Clear lock" else "Set lock") }
+            }
+        }
+        lockMsg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
     }
 }
-
 @Composable
 private fun UpdatesScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
@@ -405,6 +497,7 @@ private fun UpdatesScreen(host: TrackingHost) {
     val mdm by host.mdm.mdmPresent.collectAsState()
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
+    var installMsg by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Chip("Package", "AndroidTAKTracker.apk")
@@ -421,7 +514,7 @@ private fun UpdatesScreen(host: TrackingHost) {
         )
         if (busy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            Text("Checking for updates…", color = MaterialTheme.colorScheme.primary)
+            Text("Working…", color = MaterialTheme.colorScheme.primary)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
@@ -433,7 +526,18 @@ private fun UpdatesScreen(host: TrackingHost) {
                     }
                 },
             ) { Text("Check for updates") }
+            Button(
+                enabled = !busy && !mdm && last?.updateAvailable == true,
+                onClick = {
+                    busy = true
+                    scope.launch {
+                        try { installMsg = host.downloadAndInstallUpdate() }
+                        finally { busy = false }
+                    }
+                },
+            ) { Text("Download & install") }
         }
+        installMsg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.updates.automaticallyDownloadAndInstall && !mdm,
@@ -467,7 +571,6 @@ private fun UpdatesScreen(host: TrackingHost) {
         }
     }
 }
-
 @Composable
 private fun AboutScreen() {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {

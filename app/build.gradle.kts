@@ -13,11 +13,35 @@ android {
         applicationId = "com.copix.androidtaktracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes -PversionCode / -PversionName for continuous builds.
+        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            val storeFilePath = System.getenv("ANDROID_KEYSTORE_FILE")
+                ?: (project.findProperty("ANDROID_KEYSTORE_FILE") as String?)
+            val storePasswordEnv = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                ?: (project.findProperty("ANDROID_KEYSTORE_PASSWORD") as String?)
+            val keyAliasEnv = System.getenv("ANDROID_KEY_ALIAS")
+                ?: (project.findProperty("ANDROID_KEY_ALIAS") as String?)
+            val keyPasswordEnv = System.getenv("ANDROID_KEY_PASSWORD")
+                ?: (project.findProperty("ANDROID_KEY_PASSWORD") as String?)
+            if (!storeFilePath.isNullOrBlank() &&
+                !storePasswordEnv.isNullOrBlank() &&
+                !keyAliasEnv.isNullOrBlank() &&
+                !keyPasswordEnv.isNullOrBlank()
+            ) {
+                storeFile = file(storeFilePath)
+                storePassword = storePasswordEnv
+                keyAlias = keyAliasEnv
+                keyPassword = keyPasswordEnv
+            }
         }
     }
 
@@ -28,6 +52,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            }
         }
         debug {
             applicationIdSuffix = ".debug"

@@ -32,7 +32,13 @@ gradlew.bat :core:testDebugUnitTest
 
 Requires Android SDK (create `local.properties` with `sdk.dir=…`; that file is gitignored).
 
-Continuous releases publish `build-0.1.<run>` tags with `AndroidTAKTracker.apk` + `.sha256`.
+Continuous releases publish `build-0.1.<run>` tags with a **signed** `AndroidTAKTracker.apk` + `.sha256`.
+
+### Sideload install
+
+1. On the phone: Settings → allow install from the browser/Files app (unknown apps).
+2. Download the latest release APK (not an older unsigned build).
+3. If you previously installed a debug/unsigned build, uninstall it first — Android rejects signature mismatches with a generic “App not installed”.
 
 ## Feature parity
 

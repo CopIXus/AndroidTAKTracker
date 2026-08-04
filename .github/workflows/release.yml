@@ -26,14 +26,50 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Assemble release
-        run: ./gradlew :app:assembleRelease --stacktrace
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "Missing ANDROID_KEYSTORE_BASE64 secret — cannot produce an installable APK."
+            exit 1
+          fi
+          mkdir -p ci
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > ci/release.jks
+          ls -la ci/release.jks
+
+      - name: Assemble signed release
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ github.workspace }}/ci/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleRelease \
+            -PversionCode=${{ github.run_number }} \
+            -PversionName=0.1.${{ github.run_number }} \
+            --stacktrace
+
+      - name: Verify APK is signed
+        run: |
+          SRC=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          echo "APK: $SRC"
+          APKSIGNER=$(ls -1 "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n1)
+          "$APKSIGNER" verify --print-certs "$SRC"
+          case "$SRC" in
+            *unsigned*) echo "Refusing to publish unsigned APK"; exit 1 ;;
+          esac
+
 
       - name: Package APK + SHA256
         run: |
           TAG="build-0.1.${{ github.run_number }}"
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          # Prefer the signed artifact name if present
+          if ls app/build/outputs/apk/release/*-signed.apk >/dev/null 2>&1; then
+            SRC=$(ls app/build/outputs/apk/release/*-signed.apk | head -n1)
+          fi
           cp "$SRC" dist/AndroidTAKTracker.apk
           (cd dist && sha256sum AndroidTAKTracker.apk | awk '{print $1 "  AndroidTAKTracker.apk"}' > AndroidTAKTracker.apk.sha256)
           echo "Packaged $TAG"
@@ -55,9 +91,11 @@ jobs:
             dist/AndroidTAKTracker.apk.sha256
           generate_release_notes: true
           body: |
-            Continuous build of AndroidTAKTracker.
+            Continuous build of AndroidTAKTracker (signed release APK).
 
             Install `AndroidTAKTracker.apk`. Verify with `AndroidTAKTracker.apk.sha256`.
             MDM-managed fleets should prefer MDM app updates over the in-app updater.
+
+            If Android says "App not installed", uninstall any older unsigned/debug build first.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

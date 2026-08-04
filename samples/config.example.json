@@ -45,7 +45,6 @@
   },
   "updates": {
     "releasesApiUrl": "https://api.github.com/repos/CopIXus/AndroidTAKTracker/releases/latest",
-    "checkOnStart": false,
-    "autoInstall": false
+    "automaticallyDownloadAndInstall": false
   }
 }

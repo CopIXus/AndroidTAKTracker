@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- QR/Marti enroll no longer fails with `OperatorCreationException` — replace Android’s stub `BC` Security provider before CSR signing
 - Marti CSR enrollment now re-pairs the local private key, persists client + CA trust PKCS12 under app `certs/` with password `atakatak` (ATAK / WinTAKTracker SoftCert model), and no longer reports success without a usable certificate
 - SoftCert ZIP import requires a client `.p12`, defaults password to `atakatak`, persists trust password, and verifies KeyStore load before saving the profile
 - Server cards show connection `lastError`; Diagnostics shows/shares recent redacted logs; Identity uses a single My callsign

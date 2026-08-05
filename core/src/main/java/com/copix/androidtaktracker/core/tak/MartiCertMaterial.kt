@@ -48,13 +48,26 @@ object MartiCertMaterial {
         val trustPasswordBlobName: String? = null,
     )
 
+    /**
+     * Android ships a stub Security provider named "BC" that is not full BouncyCastle.
+     * [Security.addProvider] is a no-op when that stub is already registered, so CSR signing
+     * with `.setProvider("BC")` throws [org.bouncycastle.operator.OperatorCreationException].
+     * Always replace a non-real BC provider with [BouncyCastleProvider].
+     */
     fun ensureBc() {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(BouncyCastleProvider())
+        val name = BouncyCastleProvider.PROVIDER_NAME
+        val existing = Security.getProvider(name)
+        if (existing != null && existing.javaClass.name != BouncyCastleProvider::class.java.name) {
+            Security.removeProvider(name)
+        }
+        if (Security.getProvider(name) == null) {
+            Security.insertProviderAt(BouncyCastleProvider(), 1)
         }
     }
 
     fun generateRsaKeyPair(bits: Int = 4096): KeyPair {
+        // Platform RSA (AndroidOpenSSL / Conscrypt). CSR signing must not force the BC provider
+        // for these keys — see [createContentSigner].
         val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(bits)
         return kpg.generateKeyPair()
@@ -64,14 +77,27 @@ object MartiCertMaterial {
         ensureBc()
         val subject = X500Name(subjectDn)
         val builder = org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(subject, keyPair.public)
-        val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
-            .build(keyPair.private)
+        val signer = createContentSigner(keyPair.private)
         val csr = builder.build(signer)
         val pem = PemObject("CERTIFICATE REQUEST", csr.encoded)
         val sw = StringWriter()
         PemWriter(sw).use { it.writeObject(pem) }
         return sw.toString()
+    }
+
+    /**
+     * Prefer the platform JCA Signature (works with AndroidOpenSSL keys). Fall back to the real
+     * BouncyCastle provider after [ensureBc] replaced Android's stub.
+     */
+    fun createContentSigner(privateKey: PrivateKey): org.bouncycastle.operator.ContentSigner {
+        return try {
+            JcaContentSignerBuilder("SHA256withRSA").build(privateKey)
+        } catch (_: Exception) {
+            ensureBc()
+            JcaContentSignerBuilder("SHA256withRSA")
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .build(privateKey)
+        }
     }
 
     fun buildSubjectDn(tlsConfig: Map<String, String>, cnFallback: String): String {
@@ -237,13 +263,15 @@ object MartiCertMaterial {
             owner,
             keyPair.public,
         )
-        val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
-            .build(keyPair.private)
+        val signer = createContentSigner(keyPair.private)
         val holder = builder.build(signer)
-        val cert = JcaX509CertificateConverter()
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
-            .getCertificate(holder)
+        val cert = try {
+            JcaX509CertificateConverter()
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .getCertificate(holder)
+        } catch (_: Exception) {
+            JcaX509CertificateConverter().getCertificate(holder)
+        }
         return certToPem(cert)
     }
 

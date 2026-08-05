@@ -2,6 +2,7 @@ package com.copix.androidtaktracker.core.tak
 
 import com.copix.androidtaktracker.core.config.ConfigStore
 import com.copix.androidtaktracker.core.util.NoopRedactedLogger
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -11,6 +12,7 @@ import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.KeyStore
+import java.security.Security
 import java.util.Base64
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -152,5 +154,33 @@ class MartiCertMaterialTest {
         val pem = MartiCertMaterial.ensurePem(raw, "CERTIFICATE")
         assertTrue(pem.contains("BEGIN CERTIFICATE"))
         assertTrue(pem.contains("END CERTIFICATE"))
+    }
+
+    @Test
+    fun createCsrPem_succeedsWithPlatformRsaKey() {
+        // Mirrors the phone path: platform RSA key + CSR (must not throw OperatorCreationException).
+        val kp = MartiCertMaterial.generateRsaKeyPair(2048)
+        val csr = MartiCertMaterial.createCsrPem("CN=UNIT-USER", kp)
+        assertTrue(csr.contains("BEGIN CERTIFICATE REQUEST"))
+        assertTrue(csr.contains("END CERTIFICATE REQUEST"))
+    }
+
+    @Test
+    fun ensureBc_replacesStubProviderNamedBc() {
+        // Simulate Android's incomplete BC provider occupying the "BC" name.
+        val stub = object : java.security.Provider("BC", 1.0, "stub") {}
+        Security.removeProvider("BC")
+        Security.insertProviderAt(stub, 1)
+        try {
+            MartiCertMaterial.ensureBc()
+            val provider = Security.getProvider("BC")
+            assertNotNull(provider)
+            assertEquals(BouncyCastleProvider::class.java.name, provider!!.javaClass.name)
+            val kp = MartiCertMaterial.generateRsaKeyPair(2048)
+            val csr = MartiCertMaterial.createCsrPem("CN=STUB-TEST", kp)
+            assertTrue(csr.contains("BEGIN CERTIFICATE REQUEST"))
+        } finally {
+            MartiCertMaterial.ensureBc()
+        }
     }
 }

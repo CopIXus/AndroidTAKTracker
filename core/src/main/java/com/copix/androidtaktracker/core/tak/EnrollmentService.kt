@@ -97,6 +97,8 @@ class EnrollmentService(
         store.writeSecret(tokenBlob, token)
 
         return try {
+            // Must run before CSR: Android's stub "BC" provider causes OperatorCreationException.
+            MartiCertMaterial.ensureBc()
             val client = httpClient(softAccept)
             val cred = Credentials.basic(user, token)
             val keyPair = MartiCertMaterial.generateRsaKeyPair(4096)
@@ -314,7 +316,11 @@ class EnrollmentService(
             "Enrollment timed out. Confirm $enrollmentPort is reachable and paste a fresh Portal token promptly."
         is javax.net.ssl.SSLHandshakeException ->
             "Enrollment TLS failed. Enable Diagnostics → TLS soft-accept for private lab CAs, then retry."
-        else -> "Enrollment failed (${ex.javaClass.simpleName})."
+        else -> {
+            val detail = (ex.message ?: ex.cause?.message)?.take(160)?.trim()
+            if (detail.isNullOrBlank()) "Enrollment failed (${ex.javaClass.simpleName})."
+            else "Enrollment failed (${ex.javaClass.simpleName}): $detail"
+        }
     }
 
     private fun looksLikeSecret(text: String): Boolean =

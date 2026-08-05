@@ -11,8 +11,8 @@ object RemoteIdentityApply {
     const val CALLSIGN_SUFFIX = ".att"
 
     val KNOWN_TEAMS: List<String> = listOf(
-        "Cyan", "Blue", "Green", "Yellow", "Orange", "Red",
-        "Purple", "Magenta", "Maroon", "Teal", "White",
+        "Cyan", "Blue", "Dark Blue", "Brown", "Green", "Dark Green",
+        "Yellow", "Orange", "Red", "Purple", "Magenta", "Maroon", "Teal", "White",
     )
 
     data class Result(

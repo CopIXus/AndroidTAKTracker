@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Portal Pref-*.zip preference packages (MANIFEST + certs/config.pref) via fileshare CoT / Marti sync download, matching ATAK onReceiveImport
+
 ### Fixed
 
 - QR/Marti enroll no longer fails with `OperatorCreationException` — replace Android’s stub `BC` Security provider before CSR signing

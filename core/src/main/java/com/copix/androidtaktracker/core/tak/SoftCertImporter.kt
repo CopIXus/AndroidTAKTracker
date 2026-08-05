@@ -58,6 +58,16 @@ class SoftCertImporter(
             }
 
             if (p12Bytes == null || p12Bytes!!.isEmpty()) {
+                // Portal Pref-*.zip is identity-only (MANIFEST + certs/config.pref) — no client p12.
+                if (com.copix.androidtaktracker.core.portal.PreferencePackageParser.isPreferencePackage(zipBytes)) {
+                    val prefs = com.copix.androidtaktracker.core.portal.PreferencePackageParser.parseZipBytes(zipBytes)
+                    if (!prefs.hasAny) {
+                        return SoftCertImportResult(false, "Preference package had no callsign/team/role.")
+                    }
+                    RemoteIdentityApply.apply(config, prefs.callsign, prefs.team, prefs.role)
+                    log.info("Enroll", "Imported Pref preference package (identity only).")
+                    return SoftCertImportResult(true, "Preference package applied (callsign/team/role).")
+                }
                 return SoftCertImportResult(false, "SoftCert ZIP did not contain a client certificate (.p12/.pfx).")
             }
 

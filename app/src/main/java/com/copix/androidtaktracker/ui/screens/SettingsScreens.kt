@@ -62,7 +62,8 @@ import java.util.Date
 import java.util.Locale
 
 private val Teams = listOf(
-    "Cyan", "Blue", "Green", "Yellow", "Orange", "Red", "Purple", "Magenta", "Maroon", "Teal", "White",
+    "Cyan", "Blue", "Dark Blue", "Brown", "Green", "Dark Green",
+    "Yellow", "Orange", "Red", "Purple", "Magenta", "Maroon", "Teal", "White",
 )
 private val Roles = listOf(
     "Team Member", "Team Lead", "HQ", "Sniper", "Medic", "Forward Observer", "RTO", "K9",

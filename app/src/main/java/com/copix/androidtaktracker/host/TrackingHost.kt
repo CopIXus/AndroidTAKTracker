@@ -165,6 +165,18 @@ class TrackingHost private constructor(private val appContext: Context) {
                     }
                 }
             }
+
+            override fun onFileShareCot(profile: ServerProfile, cotXml: String) {
+                scope.launch {
+                    val managed = mdm.managedKeys.value
+                    if ("callsign" in managed || "team" in managed || "role" in managed) return@launch
+                    portal.tryHandleFileShareCot(profile, _config.value, cotXml) { cfg ->
+                        store.save(cfg)
+                        _config.value = ensureDeviceUid(store.deepCopy(cfg))
+                        reporting.noteIdentityChanged()
+                    }
+                }
+            }
         }
     }
 

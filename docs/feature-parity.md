@@ -11,7 +11,7 @@ Shared feature IDs keep the sibling repos aligned. Status values: **Yes**, **Par
 | FP-MESH-SA | UDP Mesh SA multicast 239.2.3.1:6969 | Yes | Yes |
 | FP-ENROLL-QR | QR / deep-link enrollment; Marti CSR + SoftCert PKCS12 persist (`atakatak`) | Yes | Yes |
 | FP-MDM-HEADWIND | Headwind MDM + Android Enterprise managed config | N/A | Yes |
-| FP-PORTAL-CALLSIGN | Device-profile sync; `.wtt` / `.att` suffix | Yes (.wtt) | Yes (.att) |
+| FP-PORTAL-CALLSIGN | Device-profile sync + Pref-*.zip fileshare; `.wtt` / `.att` | Yes (.wtt) | Yes (.att) |
 | FP-ATAK-DEFER | Suppress PLI when ATAK is active | N/A | Yes |
 | FP-BOOT-START | Start tracking after boot / login | Yes | Yes |
 | FP-UPDATES-CHANGELOG | GitHub Releases + inline CHANGELOG notes | Yes | Yes |

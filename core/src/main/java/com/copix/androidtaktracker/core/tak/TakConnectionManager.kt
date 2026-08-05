@@ -27,6 +27,8 @@ interface TakConnectionListener {
     fun onStatusChanged() {}
     /** Raised when a server stream reaches [TakConnectionState.CONNECTED]. */
     fun onServerConnected(profile: ServerProfile) {}
+    /** Inbound Marti fileshare CoT (Pref package announce). */
+    fun onFileShareCot(profile: ServerProfile, cotXml: String) {}
 }
 
 /**
@@ -100,6 +102,10 @@ class TakConnectionManager(
                             if (state == TakConnectionState.DISCONNECTED) {
                                 scope.launch { ensureReconnect(targetProfile.id) }
                             }
+                        }
+
+                        override fun onFileShareCot(client: CotStreamClient, profile: ServerProfile, cotXml: String) {
+                            listener?.onFileShareCot(profile, cotXml)
                         }
                     }
                     connectGates[targetProfile.id] = Mutex()

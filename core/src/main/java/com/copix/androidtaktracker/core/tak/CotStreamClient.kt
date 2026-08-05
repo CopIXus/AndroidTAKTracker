@@ -52,6 +52,8 @@ class TrustStoreConfig(
 interface CotStreamListener {
     fun onStateChanged(client: CotStreamClient, state: TakConnectionState) {}
     fun onConnected(client: CotStreamClient, profile: ServerProfile) {}
+    /** Marti fileshare / Pref-* package announce — download + apply off the read loop. */
+    fun onFileShareCot(client: CotStreamClient, profile: ServerProfile, cotXml: String) {}
 }
 
 /**
@@ -357,7 +359,10 @@ class CotStreamClient(
         if (state == TakConnectionState.CONNECTED) setState(TakConnectionState.DISCONNECTED)
     }
 
-    /** Reply to TAK Server connection tests (`t-x-c-t` -> `t-x-c-t-r`); other inbound CoT is ignored. */
+    /**
+     * Reply to TAK Server connection tests (`t-x-c-t` -> `t-x-c-t-r`).
+     * Also surfaces Marti fileshare / Pref-* package announces for Portal preference pushes.
+     */
     private suspend fun processInbound(pending: StringBuilder) {
         while (true) {
             val text = pending.toString()
@@ -375,6 +380,15 @@ class CotStreamClient(
             val endIndex = end + "</event>".length
             val xml = text2.substring(0, endIndex)
             pending.delete(0, endIndex)
+
+            if (com.copix.androidtaktracker.core.portal.FileShareCotParser.looksLikeFileShareEvent(xml)) {
+                try {
+                    listener?.onFileShareCot(this, profile, xml)
+                } catch (ex: Exception) {
+                    if (shouldLog("${profile.id}|fileshare|${ex.javaClass.simpleName}"))
+                        log.warn("TAK", "FileShare handler failed: ${ex.javaClass.simpleName}")
+                }
+            }
 
             if (!xml.contains("t-x-c-t", ignoreCase = true)) continue
             // Avoid treating our own pong as a new ping.

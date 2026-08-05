@@ -61,21 +61,120 @@ class DeviceProfileSync(
                 return
             }
 
-            val prefs = PreferencePackageParser.parseZipBytes(bytes)
-            if (!prefs.hasAny) {
-                log.info("Profile", "Device profile package had no callsign/team/role prefs.")
-                return
-            }
-
-            val result = RemoteIdentityApply.apply(config, prefs.callsign, prefs.team, prefs.role)
-            if (!result.applied) return
-
-            saveConfig(config)
-            log.info("Profile", "Remote identity applied (${result.target}): callsign/team updated.")
-            onIdentityApplied?.invoke(result)
+            applyParsedPrefs(bytes, config, saveConfig, filenameHint = null)
         } catch (ex: Exception) {
             log.warn("Profile", "Device profile sync skipped: ${ex.javaClass.simpleName}")
         }
+    }
+
+    /**
+     * Handle inbound Marti fileshare CoT for Portal Pref-* packages (missioncreate → contact).
+     * Downloads via Enterprise Sync and applies identity when `onReceiveImport` allows.
+     */
+    suspend fun tryHandleFileShareCot(
+        profile: ServerProfile,
+        config: AppConfig,
+        cotXml: String,
+        saveConfig: (AppConfig) -> Unit,
+    ) {
+        if (!config.applyRemoteIdentityFromPortal) return
+
+        val offer = FileShareCotParser.tryParse(cotXml) ?: return
+        val looksPref = offer.looksLikePreferencePackage ||
+            (offer.filename?.endsWith(".zip", true) == true &&
+                offer.filename.contains("Pref", ignoreCase = true))
+        if (!looksPref) return
+
+        try {
+            val bytes = downloadSyncContent(profile, config, offer)
+            if (bytes == null || bytes.isEmpty()) {
+                log.warn("Profile", "Pref package download empty or failed.")
+                return
+            }
+            if (!PreferencePackageParser.isPreferencePackage(bytes, offer.filename)) {
+                log.info("Profile", "Downloaded fileshare was not a Pref preference package — ignored.")
+                return
+            }
+            applyParsedPrefs(bytes, config, saveConfig, offer.filename)
+        } catch (ex: Exception) {
+            log.warn("Profile", "Pref package import skipped: ${ex.javaClass.simpleName}")
+        }
+    }
+
+    fun tryApplyPreferencePackageBytes(
+        bytes: ByteArray,
+        config: AppConfig,
+        saveConfig: (AppConfig) -> Unit,
+        filenameHint: String? = null,
+    ): Boolean = applyParsedPrefs(bytes, config, saveConfig, filenameHint)
+
+    private fun applyParsedPrefs(
+        bytes: ByteArray,
+        config: AppConfig,
+        saveConfig: (AppConfig) -> Unit,
+        filenameHint: String?,
+    ): Boolean {
+        val prefs = PreferencePackageParser.parseZipBytes(bytes)
+        if (!prefs.hasAny) {
+            log.info("Profile", "Preference package had no callsign/team/role prefs.")
+            return false
+        }
+        if (!PreferencePackageParser.shouldAutoImport(prefs)) {
+            log.info("Profile", "Preference package onReceiveImport=false — skipped auto-import.")
+            return false
+        }
+
+        val result = RemoteIdentityApply.apply(config, prefs.callsign, prefs.team, prefs.role)
+        if (!result.applied) return false
+
+        saveConfig(config)
+        log.info(
+            "Profile",
+            "Remote identity applied (${result.target}) from ${filenameHint ?: "preference package"}: callsign/team/role updated.",
+        )
+        onIdentityApplied?.invoke(result)
+        return true
+    }
+
+    private suspend fun downloadSyncContent(
+        profile: ServerProfile,
+        config: AppConfig,
+        offer: FileShareOffer,
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        val urls = mutableListOf<String>()
+        val sender = offer.senderUrl
+        if (!sender.isNullOrBlank()) {
+            try {
+                val host = java.net.URI(sender).host
+                if (host.equals(profile.host, ignoreCase = true)) urls += sender
+            } catch (_: Exception) { /* ignore */ }
+        }
+        if (!offer.sha256.isNullOrBlank()) {
+            val hash = URLEncoder.encode(offer.sha256, "UTF-8")
+            for (port in intArrayOf(8443, 8446)) {
+                urls += "https://${profile.host}:$port/Marti/sync/content?hash=$hash"
+                urls += "https://${profile.host}:$port/Marti/api/sync/metadata/$hash/content"
+            }
+        }
+
+        for (url in urls.distinct()) {
+            try {
+                val client = buildHttpClient(profile, config)
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "AndroidTAKTracker/0.1")
+                    .header("Accept", "*/*")
+                    .build()
+                client.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val bytes = resp.body?.bytes()
+                    if (bytes != null && bytes.isNotEmpty()) return@withContext bytes
+                }
+            } catch (_: Exception) {
+                // try next URL
+            }
+        }
+        null
     }
 
     private suspend fun downloadProfilePackage(profile: ServerProfile, config: AppConfig): ByteArray? =

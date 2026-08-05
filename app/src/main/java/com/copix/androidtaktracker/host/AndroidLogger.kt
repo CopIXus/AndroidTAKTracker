@@ -15,6 +15,8 @@ class AndroidLogger(logsDir: File) : RedactedLogger {
     override fun clearOldLogs(olderThanMs: Long) = file.clearOldLogs(olderThanMs)
     override fun enforceSizeLimit() = file.enforceSizeLimit()
 
+    fun readRecentText(maxBytes: Int = 64 * 1024): String = file.readRecentText(maxBytes)
+
     override fun info(category: String, message: String) {
         android.util.Log.i(category, RedactedFileLogger.redact(message))
         file.info(category, message)

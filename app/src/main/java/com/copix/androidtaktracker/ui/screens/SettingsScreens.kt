@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -34,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,8 +45,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.copix.androidtaktracker.BuildConfig
 import com.copix.androidtaktracker.core.identity.IdentityResolver
 import com.copix.androidtaktracker.core.tak.TakConnectionState
@@ -87,19 +91,26 @@ private fun StatusScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     val fix by host.gps.fix.collectAsState()
     val paused by host.paused.collectAsState()
-    val states by host.serverStates.collectAsState()
+    val statuses by host.serverStatuses.collectAsState()
     val identity = IdentityResolver.resolve(config)
     val defer = host.atak.shouldDefer(config.atak.deferToAtak)
-    val connected = states.values.count { it == TakConnectionState.CONNECTED }
+    val connected = statuses.values.count { it.state == TakConnectionState.CONNECTED }
+    val firstError = statuses.values.firstOrNull {
+        !it.lastErrorCode.isNullOrBlank() &&
+            (it.state == TakConnectionState.ERROR || it.state == TakConnectionState.DISCONNECTED)
+    }?.lastErrorCode
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Tracking-only TAK PLI client. Map clients show your position from CoT.")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("Mode", if (paused) "Paused" else if (defer) "Defer ATAK" else "Tracking")
-            Chip("Callsign", "${identity.callsign} (${identity.source})")
+            Chip("Callsign", identity.callsign)
             Chip("GPS", fix?.source?.name ?: "No fix")
             Chip("Servers", "$connected connected")
             Chip("Last PLI", formatTime(host.lastPliEpochMs))
+        }
+        firstError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { host.setPaused(!paused) }) {
@@ -120,14 +131,16 @@ private fun StatusScreen(host: TrackingHost) {
 @Composable
 private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
     val config by host.config.collectAsState()
-    val states by host.serverStates.collectAsState()
+    val statuses by host.serverStatuses.collectAsState()
+    val enrollFeedback by host.lastEnrollFeedback.collectAsState()
     val unlocked by host.settingsUnlocked.collectAsState()
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     var enrollText by remember { mutableStateOf("") }
     var manualHost by remember { mutableStateOf("") }
     var manualPort by remember { mutableStateOf("8089") }
-    var message by remember { mutableStateOf<String?>(null) }
+    var localMessage by remember { mutableStateOf<String?>(null) }
+    var localOk by remember { mutableStateOf(true) }
     val managed = host.mdm.managedKeys.collectAsState().value
     val editable = unlocked || !host.isSettingsLocked
 
@@ -137,18 +150,38 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             val bytes = withContext(Dispatchers.IO) {
                 ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }
-            message = if (bytes == null) "Could not read SoftCert ZIP."
-            else host.importSoftCertZip(bytes).message
+            if (bytes == null) {
+                localMessage = "Could not read SoftCert ZIP."
+                localOk = false
+            } else {
+                val r = host.importSoftCertZip(bytes)
+                localMessage = r.message
+                localOk = r.success
+            }
         }
     }
+
+    val banner = localMessage ?: enrollFeedback?.message
+    val bannerOk = if (localMessage != null) localOk else enrollFeedback?.success != false
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Add TAK servers via QR, enrollment URL, SoftCert ZIP, or manual host. Fake hosts only in samples.")
         if ("enrollUrl" in managed || "serverHost" in managed) ManagedBadge()
         if (!editable) Blurb("Settings are locked — unlock under Diagnostics to edit.")
+        banner?.let {
+            Text(
+                it,
+                color = if (bannerOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (enrollFeedback != null && localMessage == null) {
+                TextButton(onClick = { host.clearEnrollFeedback() }) { Text("Dismiss") }
+            }
+        }
         config.servers.forEach { server ->
+            val status = statuses[server.id]
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             checked = server.enabled,
@@ -161,7 +194,15 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                             Text(server.displayName, fontWeight = FontWeight.SemiBold)
                             Text("${server.host}:${server.port} (${server.protocol})", style = MaterialTheme.typography.bodySmall)
                         }
-                        Chip("Status", states[server.id]?.name ?: "—")
+                        Chip("Status", status?.state?.name ?: "—")
+                    }
+                    val err = status?.lastErrorCode?.takeIf { it.isNotBlank() }
+                    if (err != null && status.state != TakConnectionState.CONNECTED) {
+                        Text(
+                            err,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     TextButton(enabled = editable, onClick = {
                         host.saveConfig { c -> c.servers.removeAll { it.id == server.id } }
@@ -180,7 +221,8 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             Button(enabled = editable && "enrollUrl" !in managed, onClick = {
                 scope.launch {
                     val r = host.enroll(enrollText)
-                    message = r.message
+                    localMessage = r.message
+                    localOk = r.success
                     if (r.success) enrollText = ""
                 }
             }) { Text("Apply") }
@@ -216,10 +258,10 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                     )
                 }
                 manualHost = ""
-                message = "Server added."
+                localMessage = "Server added."
+                localOk = true
             },
         ) { Text("Add manual server") }
-        message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
     }
 }
 @Composable
@@ -235,7 +277,10 @@ private fun IdentityScreen(host: TrackingHost) {
     }
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Blurb("My callsign is used for CoT. Portal pushes append .att automatically.")
+        Blurb(
+            "Android uses a single callsign (My callsign) for CoT — there is no separate device/computer " +
+                "callsign like WinTAKTracker. Portal pushes append .att automatically.",
+        )
         if ("callsign" in managed) ManagedBadge()
         OutlinedTextField(
             value = callsign,
@@ -253,17 +298,16 @@ private fun IdentityScreen(host: TrackingHost) {
             )
             Text("Apply callsign/team from Portal / device-profile sync")
         }
-        OutlinedTextField(
-            value = config.deviceIdentity.callsign,
-            onValueChange = { v -> host.saveConfig { it.deviceIdentity.callsign = v } },
-            label = { Text("Device callsign (fallback)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
         Button(onClick = {
             host.saveConfig {
-                it.userIdentity.callsign = callsign.trim()
+                val trimmed = callsign.trim()
+                it.userIdentity.callsign = trimmed
                 it.userIdentity.team = team
                 it.userIdentity.role = role
+                // Keep internal deviceIdentity aligned — Android has one operator callsign only.
+                if (trimmed.isNotBlank()) it.deviceIdentity.callsign = trimmed
+                it.deviceIdentity.team = team
+                it.deviceIdentity.role = role
             }
         }) { Text("Save identity") }
     }
@@ -433,9 +477,21 @@ private fun DiagnosticsScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     val unlocked by host.settingsUnlocked.collectAsState()
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var lockPassword by remember { mutableStateOf("") }
     var lockMsg by remember { mutableStateOf<String?>(null) }
+    var logText by remember { mutableStateOf("Loading logs…") }
+    val logScroll = rememberScrollState()
     val canEdit = unlocked || !host.isSettingsLocked
+
+    fun refreshLogs() {
+        scope.launch {
+            logText = withContext(Dispatchers.IO) { host.readRecentLogs() }
+            logScroll.scrollTo(logScroll.maxValue)
+        }
+    }
+
+    LaunchedEffect(Unit) { refreshLogs() }
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         EnumDropdown(
@@ -444,6 +500,7 @@ private fun DiagnosticsScreen(host: TrackingHost) {
             listOf("Debug", "Information", "Warning", "Error"),
             canEdit,
         ) { v -> host.saveConfig { it.diagnostics.logLevel = v } }
+        Blurb("Default is Error (quiet). Switch to Information or Debug before reproducing a connection problem.")
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.diagnostics.allowInsecureTlsSoftAccept,
@@ -454,6 +511,36 @@ private fun DiagnosticsScreen(host: TrackingHost) {
         }
         Blurb("Device UID: ${config.deviceUid}")
         Blurb("ATAK installed: ${host.atak.installed.value} · running: ${host.atak.running.value}")
+
+        Text("Recent logs", fontWeight = FontWeight.SemiBold)
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                logText,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 160.dp, max = 320.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .verticalScroll(logScroll)
+                    .padding(12.dp),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                ),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { refreshLogs() }) { Text("Refresh logs") }
+            OutlinedButton(onClick = {
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "AndroidTAKTracker logs")
+                    putExtra(Intent.EXTRA_TEXT, host.readRecentLogs())
+                }
+                ctx.startActivity(Intent.createChooser(send, "Share logs"))
+            }) { Text("Share logs") }
+        }
+
         OutlinedButton(onClick = {
             val json = host.exportStatusJson()
             val send = Intent(Intent.ACTION_SEND).apply {

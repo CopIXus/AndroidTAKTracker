@@ -108,6 +108,7 @@ class MainActivity : ComponentActivity() {
                             showQr = false
                             scope.launch {
                                 val r = host.enroll(raw)
+                                // Durable banner on Servers + snackbar (snackbar alone was easy to miss).
                                 snackbar.showSnackbar(r.message)
                             }
                         },
@@ -168,8 +169,10 @@ private fun CallsignSetupScreen(host: TrackingHost, onDone: (saved: Boolean) -> 
             enabled = callsign.isNotBlank(),
             onClick = {
                 val ok = host.saveConfig {
-                    it.userIdentity.callsign = callsign.trim()
+                    val trimmed = callsign.trim()
+                    it.userIdentity.callsign = trimmed
                     it.userIdentity.setupPromptDismissed = true
+                    if (trimmed.isNotBlank()) it.deviceIdentity.callsign = trimmed
                 }
                 if (ok) onDone(true)
                 else error = "Could not save (settings locked?)."

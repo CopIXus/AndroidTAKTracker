@@ -12,7 +12,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.security.KeyPairGenerator
+import java.io.File
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.UUID
@@ -27,6 +27,11 @@ data class EnrollmentApplyResult(
     val profileId: String? = null,
 )
 
+/**
+ * Portal / SoftCert / Marti enrollment. Certificate material is written under
+ * [ConfigStore.certsDirectory] and passwords under [ConfigStore] secrets so mTLS
+ * reconnects work after process death (ATAK SoftCert / Marti model).
+ */
 class EnrollmentService(
     private val store: ConfigStore,
     private val log: RedactedLogger,
@@ -46,7 +51,8 @@ class EnrollmentService(
             }
             EnrollmentKind.TAK_IMPORT_URL -> {
                 val url = parsed.importUrl ?: return@withContext EnrollmentApplyResult(false, "Missing import URL.")
-                val bytes = download(url) ?: return@withContext EnrollmentApplyResult(false, "Download failed.")
+                val softAccept = config.diagnostics.allowInsecureTlsSoftAccept
+                val bytes = download(url, softAccept) ?: return@withContext EnrollmentApplyResult(false, "Download failed.")
                 val r = softCert.importZip(bytes, config)
                 if (r.success) store.save(config)
                 EnrollmentApplyResult(r.success, r.message, r.profileId)
@@ -82,132 +88,237 @@ class EnrollmentService(
         val host = parsed.host ?: return EnrollmentApplyResult(false, "Missing host.")
         val user = parsed.username ?: return EnrollmentApplyResult(false, "Missing username.")
         val token = parsed.token ?: return EnrollmentApplyResult(false, "Missing token.")
-        val enrollPort = parsed.enrollmentPort
+        val enrollPort = if (parsed.enrollmentPort > 0) parsed.enrollmentPort else 8446
+        val softAccept = config.diagnostics.allowInsecureTlsSoftAccept
+        val profileId = UUID.randomUUID().toString().replace("-", "")
+        val tokenBlob = "$profileId-token"
+
+        store.ensureDirectories()
+        store.writeSecret(tokenBlob, token)
+
         return try {
-            val kpg = KeyPairGenerator.getInstance("RSA")
-            kpg.initialize(2048)
-            val kp = kpg.generateKeyPair()
-            val cn = config.deviceUid ?: "ANDROIDTAKTRACKER"
-            val csrPem = buildMinimalCsrPem(kp.public.encoded, kp.private, cn)
-
-            val client = trustAllClient()
+            val client = httpClient(softAccept)
             val cred = Credentials.basic(user, token)
-            val url = "https://$host:$enrollPort/Marti/api/tls/signClient?clientUid=$cn"
-            val req = Request.Builder()
-                .url(url)
-                .header("Authorization", cred)
-                .post(csrPem.toRequestBody("application/pkcs10".toMediaType()))
-                .build()
+            val keyPair = MartiCertMaterial.generateRsaKeyPair(4096)
 
-            val p12Bytes: ByteArray
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    log.warn("Enroll", "CSR enroll HTTP ${resp.code}; saving profile credentials only.")
-                    return saveCredentialProfile(parsed, config, host, user, token)
+            val tlsConfig = fetchTlsConfig(client, cred, host, enrollPort).toMutableMap()
+            tlsConfig["CN"] = user
+            val subject = MartiCertMaterial.buildSubjectDn(tlsConfig, user)
+            val csrPem = MartiCertMaterial.createCsrPem(subject, keyPair)
+            val uid = sanitizeClientUid(config.deviceUid ?: "ANDROIDTAKTRACKER")
+
+            val v2Url = "https://$host:$enrollPort/Marti/api/tls/signClient/v2?clientUid=$uid"
+            val v1Url = "https://$host:$enrollPort/Marti/api/tls/signClient?clientUid=$uid"
+
+            var lastError: String? = null
+            val v2 = postCsr(client, cred, v2Url, csrPem)
+            when {
+                v2.code == 401 || v2.code == 403 -> {
+                    cleanupPartial(profileId, tokenBlob, null, null, null, null)
+                    return EnrollmentApplyResult(false, describeAuthFailure(v2.code, v2.text))
                 }
-                p12Bytes = resp.body?.bytes() ?: return EnrollmentApplyResult(false, "Empty enroll response.")
+                v2.ok -> {
+                    val built = MartiCertMaterial.tryBuildFromV2Json(v2.bytes, keyPair, profileId, store, log)
+                    if (built.success) {
+                        return finishProfile(parsed, config, host, user, profileId, tokenBlob, built)
+                    }
+                    lastError = built.error
+                    log.info("Enroll", "signClient/v2 response not usable; trying v1.")
+                }
+                else -> lastError = describeHttpFailure(v2.code, v2.text, enrollPort)
             }
 
-            val id = UUID.randomUUID().toString().replace("-", "")
-            val certFile = "client-$id.p12"
-            java.io.File(store.certsDirectory, certFile).writeBytes(p12Bytes)
-            val passName = "cert-pass-$id"
-            store.writeSecret(passName, "")
+            val v1 = postCsr(client, cred, v1Url, csrPem)
+            when {
+                v1.code == 401 || v1.code == 403 -> {
+                    cleanupPartial(profileId, tokenBlob, null, null, null, null)
+                    return EnrollmentApplyResult(false, describeAuthFailure(v1.code, v1.text))
+                }
+                v1.ok -> {
+                    val built = MartiCertMaterial.tryBuildFromV1Body(v1.bytes, keyPair, profileId, store, log)
+                    if (built.success) {
+                        return finishProfile(parsed, config, host, user, profileId, tokenBlob, built)
+                    }
+                    lastError = built.error
+                }
+                else -> lastError = describeHttpFailure(v1.code, v1.text, enrollPort)
+            }
 
-            config.servers.add(
-                ServerProfile(
-                    id = id,
-                    displayName = host,
-                    host = host,
-                    port = parsed.port ?: 8089,
-                    protocol = parsed.protocol,
-                    username = user,
-                    clientCertFileName = certFile,
-                    certPasswordBlobName = passName,
-                ),
+            cleanupPartial(profileId, tokenBlob, null, null, null, null)
+            EnrollmentApplyResult(
+                false,
+                lastError ?: "Certificate enrollment failed on both signClient/v2 and v1.",
             )
-            RemoteIdentityApply.apply(config, parsed.callsign, parsed.team, parsed.role)
-            store.save(config)
-            EnrollmentApplyResult(true, "Enrolled to $host", id)
         } catch (ex: Exception) {
+            cleanupPartial(profileId, tokenBlob, null, null, null, null)
             log.warn("Enroll", "Enrollment failed: ${ex.javaClass.simpleName}")
-            saveCredentialProfile(parsed, config, host, user, token)
+            EnrollmentApplyResult(false, describeEnrollException(ex, enrollPort))
         }
     }
 
-    private fun saveCredentialProfile(
+    private fun finishProfile(
         parsed: EnrollmentParseResult,
         config: AppConfig,
         host: String,
         user: String,
-        token: String,
+        profileId: String,
+        tokenBlob: String,
+        built: MartiCertMaterial.PersistResult,
     ): EnrollmentApplyResult {
-        val id = UUID.randomUUID().toString().replace("-", "")
-        val secret = "token-$id"
-        store.writeSecret(secret, token)
         config.servers.add(
             ServerProfile(
-                id = id,
+                id = profileId,
                 displayName = host,
                 host = host,
                 port = parsed.port ?: 8089,
-                protocol = parsed.protocol,
+                protocol = parsed.protocol.ifBlank { "ssl" },
                 username = user,
-                secretBlobName = secret,
+                secretBlobName = tokenBlob,
+                clientCertFileName = built.clientCertFileName,
+                trustStoreFileName = built.trustStoreFileName,
+                certPasswordBlobName = built.certPasswordBlobName,
+                trustPasswordBlobName = built.trustPasswordBlobName,
             ),
         )
         RemoteIdentityApply.apply(config, parsed.callsign, parsed.team, parsed.role)
         store.save(config)
+        log.info("Enroll", "Marti CSR enrollment succeeded; client/trust PKCS12 persisted.")
         return EnrollmentApplyResult(
             true,
-            "Saved server $host (certificate enrollment incomplete — import SoftCert if required).",
-            id,
+            "Certificate enrolled. Server profile ready for SSL CoT on port ${parsed.port ?: 8089}.",
+            profileId,
         )
     }
 
-    private fun buildMinimalCsrPem(
-        publicKey: ByteArray,
-        privateKey: java.security.PrivateKey,
-        cn: String,
-    ): String {
-        if (java.security.Security.getProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME) == null) {
-            java.security.Security.addProvider(org.bouncycastle.jce.provider.BouncyCastleProvider())
-        }
-        val pub = java.security.KeyFactory.getInstance("RSA")
-            .generatePublic(java.security.spec.X509EncodedKeySpec(publicKey))
-        val subject = org.bouncycastle.asn1.x500.X500Name("CN=$cn")
-        val builder = org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(subject, pub)
-        val signer = org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME)
-            .build(privateKey)
-        val csr = builder.build(signer)
-        val pem = org.bouncycastle.util.io.pem.PemObject("CERTIFICATE REQUEST", csr.encoded)
-        val sw = java.io.StringWriter()
-        org.bouncycastle.util.io.pem.PemWriter(sw).use { it.writeObject(pem) }
-        return sw.toString()
+    private fun cleanupPartial(
+        profileId: String,
+        tokenBlob: String?,
+        clientFile: String?,
+        trustFile: String?,
+        certPwd: String?,
+        trustPwd: String?,
+    ) {
+        try {
+            tokenBlob?.let { store.deleteSecret(it) }
+            certPwd?.let { store.deleteSecret(it) }
+            trustPwd?.let { store.deleteSecret(it) }
+            fun del(name: String?) {
+                if (name.isNullOrBlank()) return
+                val f = File(store.certsDirectory, name)
+                if (f.exists()) f.delete()
+            }
+            del(clientFile)
+            del(trustFile)
+            del("$profileId-client.p12")
+            del("$profileId-trust.p12")
+            del("$profileId-trust-chain.pem")
+        } catch (_: Exception) { /* best-effort */ }
     }
 
-    private fun download(url: String): ByteArray? {
+    private data class HttpBody(val ok: Boolean, val code: Int, val bytes: ByteArray, val text: String?)
+
+    private fun postCsr(client: OkHttpClient, auth: String, url: String, csrPem: String): HttpBody {
+        val req = Request.Builder()
+            .url(url)
+            .header("Authorization", auth)
+            .header("User-Agent", "AndroidTAKTracker/0.1")
+            .post(csrPem.toRequestBody("application/pkcs10".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            val bytes = resp.body?.bytes() ?: ByteArray(0)
+            val text = if (bytes.isNotEmpty() && bytes.size < 512_000 && MartiCertMaterial.looksLikeText(bytes)) {
+                String(bytes, Charsets.UTF_8)
+            } else null
+            return HttpBody(resp.isSuccessful, resp.code, bytes, text)
+        }
+    }
+
+    private fun fetchTlsConfig(client: OkHttpClient, auth: String, host: String, enrollPort: Int): Map<String, String> {
         return try {
-            trustAllClient().newCall(Request.Builder().url(url).build()).execute().use { it.body?.bytes() }
+            val req = Request.Builder()
+                .url("https://$host:$enrollPort/Marti/api/tls/config")
+                .header("Authorization", auth)
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    log.warn("Enroll", "tls/config HTTP ${resp.code}; using CN only.")
+                    return emptyMap()
+                }
+                val xml = resp.body?.string().orEmpty()
+                MartiCertMaterial.parseTlsConfigXml(xml)
+            }
+        } catch (ex: Exception) {
+            log.warn("Enroll", "tls/config failed: ${ex.javaClass.simpleName}; using CN only.")
+            emptyMap()
+        }
+    }
+
+    private fun download(url: String, softAccept: Boolean): ByteArray? {
+        return try {
+            httpClient(softAccept).newCall(Request.Builder().url(url).build()).execute().use { it.body?.bytes() }
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun trustAllClient(): OkHttpClient {
-        val trustAll = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-        }
-        val ctx = SSLContext.getInstance("TLS")
-        ctx.init(null, arrayOf<TrustManager>(trustAll), SecureRandom())
-        return OkHttpClient.Builder()
-            .sslSocketFactory(ctx.socketFactory, trustAll)
-            .hostnameVerifier { _, _ -> true }
+    private fun httpClient(softAccept: Boolean): OkHttpClient {
+        val builder = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
-            .build()
+        if (softAccept) {
+            val trustAll = object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            val ctx = SSLContext.getInstance("TLS")
+            ctx.init(null, arrayOf<TrustManager>(trustAll), SecureRandom())
+            builder.sslSocketFactory(ctx.socketFactory, trustAll)
+            builder.hostnameVerifier { _, _ -> true }
+            log.warn("Enroll", "HTTPS soft-accept during enrollment (Diagnostics).")
+        }
+        return builder.build()
     }
+
+    private fun sanitizeClientUid(uid: String): String {
+        val cleaned = uid.filter { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
+        return cleaned.ifBlank { UUID.randomUUID().toString().replace("-", "") }
+    }
+
+    private fun describeAuthFailure(code: Int, body: String?): String {
+        val hint = if (code == 401) {
+            "Unauthorized — enroll token may be expired or already used (Portal tokens are typically valid ~15 minutes)."
+        } else {
+            "Forbidden — enrollment credentials rejected."
+        }
+        if (!body.isNullOrBlank() && body.length < 200 && !looksLikeSecret(body)) {
+            return "$hint Server said: ${body.trim()}"
+        }
+        return hint
+    }
+
+    private fun describeHttpFailure(code: Int, body: String?, enrollmentPort: Int): String {
+        var msg = "Enrollment HTTP $code on port $enrollmentPort."
+        if (code == 404) msg += " Server may not expose Marti certificate enrollment."
+        if (!body.isNullOrBlank() && body.length < 200 && !looksLikeSecret(body)) {
+            msg += " ${body.trim()}"
+        }
+        return msg
+    }
+
+    private fun describeEnrollException(ex: Exception, enrollmentPort: Int): String = when (ex) {
+        is java.net.UnknownHostException, is java.net.ConnectException ->
+            "Enrollment port unreachable (network/DNS/TLS). Confirm host and that $enrollmentPort is open."
+        is java.net.SocketTimeoutException ->
+            "Enrollment timed out. Confirm $enrollmentPort is reachable and paste a fresh Portal token promptly."
+        is javax.net.ssl.SSLHandshakeException ->
+            "Enrollment TLS failed. Enable Diagnostics → TLS soft-accept for private lab CAs, then retry."
+        else -> "Enrollment failed (${ex.javaClass.simpleName})."
+    }
+
+    private fun looksLikeSecret(text: String): Boolean =
+        text.contains("token=", ignoreCase = true) ||
+            text.contains("password", ignoreCase = true) ||
+            (text.length > 64 && text.all { it.isLetterOrDigit() || it == '-' || it == '_' })
 }

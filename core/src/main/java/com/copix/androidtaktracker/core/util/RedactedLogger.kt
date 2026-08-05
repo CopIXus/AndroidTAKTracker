@@ -88,6 +88,30 @@ class RedactedFileLogger(logsDirectory: File) : RedactedLogger {
         synchronized(gate) { trimToLimitLocked() }
     }
 
+    /** Tail of the newest log file (already redacted on write). Empty message if none yet. */
+    fun readRecentText(maxBytes: Int = 64 * 1024): String {
+        val cap = maxBytes.coerceIn(4 * 1024, 512 * 1024)
+        synchronized(gate) {
+            try { writer?.flush() } catch (_: Exception) { /* ignore */ }
+            val files = (logsDir.listFiles { f ->
+                f.name.startsWith(FILE_PREFIX) && f.name.endsWith(".log")
+            } ?: emptyArray()).sortedByDescending { it.lastModified() }
+            if (files.isEmpty()) {
+                return "(No log files yet. Set log level to Information or Debug, reproduce the issue, then Refresh.)"
+            }
+            val newest = files.first()
+            val bytes = newest.readBytes()
+            if (bytes.isEmpty()) return "(Log file is empty.)"
+            val slice = if (bytes.size <= cap) bytes else {
+                var start = bytes.size - cap
+                while (start < bytes.size && bytes[start] != '\n'.code.toByte()) start++
+                if (start < bytes.size) start++
+                bytes.copyOfRange(start, bytes.size)
+            }
+            return String(slice, Charsets.UTF_8)
+        }
+    }
+
     private fun write(level: LogLevel, category: String, message: String) {
         // Diagnostics always keep Information+ regardless of min level, everything else honors it.
         val diagnosticsOps = category.equals("Diagnostics", ignoreCase = true)

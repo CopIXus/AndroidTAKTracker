@@ -9,7 +9,7 @@ Shared feature IDs keep the sibling repos aligned. Status values: **Yes**, **Par
 | FP-GPS-FUSED | Platform fused / Windows Location provider | Yes | Yes |
 | FP-GPS-IP-FALLBACK | IP geolocation (ipwho.is) delayed fallback | Yes | Yes |
 | FP-MESH-SA | UDP Mesh SA multicast 239.2.3.1:6969 | Yes | Yes |
-| FP-ENROLL-QR | QR / deep-link enrollment (tak://, opentaktracker://) | Yes | Yes |
+| FP-ENROLL-QR | QR / deep-link enrollment; Marti CSR + SoftCert PKCS12 persist (`atakatak`) | Yes | Yes |
 | FP-MDM-HEADWIND | Headwind MDM + Android Enterprise managed config | N/A | Yes |
 | FP-PORTAL-CALLSIGN | Device-profile sync; `.wtt` / `.att` suffix | Yes (.wtt) | Yes (.att) |
 | FP-ATAK-DEFER | Suppress PLI when ATAK is active | N/A | Yes |
@@ -17,7 +17,7 @@ Shared feature IDs keep the sibling repos aligned. Status values: **Yes**, **Par
 | FP-UPDATES-CHANGELOG | GitHub Releases + inline CHANGELOG notes | Yes | Yes |
 | FP-SETTINGS-LOCK | Settings lock password | Yes | Yes |
 | FP-PAUSE | Pause outbound CoT without quitting | Yes | Yes |
-| FP-DIAGNOSTICS | Log level, TLS soft-accept, status export | Yes | Yes |
+| FP-DIAGNOSTICS | Log level, TLS soft-accept, status export; Android in-app log viewer/share | Yes (folder) | Yes (viewer) |
 | FP-VIDEO | In-app video push / CoT advertise | Yes | N/A — [ICU VideoStreamer](https://github.com/jpat-12/TAK-PluginSuite-ICU_VideoStreamer/releases/tag/2.4.0) |
 
 When adding a feature, update this table in **both** repos and note the sibling in the PR.

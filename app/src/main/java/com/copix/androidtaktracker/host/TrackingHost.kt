@@ -29,10 +29,11 @@ import com.copix.androidtaktracker.core.reporting.ReportingEngine
 import com.copix.androidtaktracker.core.tak.ClientCertificateMaterial
 import com.copix.androidtaktracker.core.tak.EnrollmentApplyResult
 import com.copix.androidtaktracker.core.tak.EnrollmentService
+import com.copix.androidtaktracker.core.tak.MartiCertMaterial
+import com.copix.androidtaktracker.core.tak.ServerConnectionStatus
 import com.copix.androidtaktracker.core.tak.ServerCredentialProvider
 import com.copix.androidtaktracker.core.tak.TakConnectionListener
 import com.copix.androidtaktracker.core.tak.TakConnectionManager
-import com.copix.androidtaktracker.core.tak.TakConnectionState
 import com.copix.androidtaktracker.core.tak.TrustStoreConfig
 import com.copix.androidtaktracker.core.update.GitHubUpdateService
 import com.copix.androidtaktracker.core.update.UpdateCheckResult
@@ -74,7 +75,8 @@ class TrackingHost private constructor(private val appContext: Context) {
             val name = profile.clientCertFileName ?: return null
             val file = File(store.certsDirectory, name)
             if (!file.exists()) return null
-            val pass = profile.certPasswordBlobName?.let { store.readSecret(it) } ?: ""
+            // ATAK / SoftCert / Marti PKCS12 password is almost always "atakatak" when unset.
+            val pass = resolveCertPassword(profile)
             return ClientCertificateMaterial(file.readBytes(), pass.toCharArray())
         }
 
@@ -85,16 +87,14 @@ class TrackingHost private constructor(private val appContext: Context) {
             }
             val file = File(store.certsDirectory, name)
             if (!file.exists()) return TrustStoreConfig(allowInsecureSoftAccept = allowInsecureSoftAccept)
-            val pass = profile.trustPasswordBlobName?.let { store.readSecret(it) } ?: ""
-            return TrustStoreConfig(file.readBytes(), pass.toCharArray(), allowInsecureSoftAccept)
+            return TrustStoreConfig(file.readBytes(), resolveTrustPassword(profile).toCharArray(), allowInsecureSoftAccept)
         }
 
         override fun trustStorePkcs12(profile: ServerProfile): Pair<ByteArray, CharArray>? {
             val name = profile.trustStoreFileName ?: return null
             val file = File(store.certsDirectory, name)
             if (!file.exists()) return null
-            val pass = profile.trustPasswordBlobName?.let { store.readSecret(it) } ?: ""
-            return file.readBytes() to pass.toCharArray()
+            return file.readBytes() to resolveTrustPassword(profile).toCharArray()
         }
     }
 
@@ -126,8 +126,12 @@ class TrackingHost private constructor(private val appContext: Context) {
     private val _paused = MutableStateFlow(false)
     val paused: StateFlow<Boolean> = _paused
 
-    private val _serverStates = MutableStateFlow<Map<String, TakConnectionState>>(emptyMap())
-    val serverStates: StateFlow<Map<String, TakConnectionState>> = _serverStates
+    private val _serverStatuses = MutableStateFlow<Map<String, ServerConnectionStatus>>(emptyMap())
+    val serverStatuses: StateFlow<Map<String, ServerConnectionStatus>> = _serverStatuses
+
+    /** Last enroll / SoftCert / QR result — kept so Servers can show it after leaving the scanner. */
+    private val _lastEnrollFeedback = MutableStateFlow<EnrollmentApplyResult?>(null)
+    val lastEnrollFeedback: StateFlow<EnrollmentApplyResult?> = _lastEnrollFeedback
 
     private val _lastUpdate = MutableStateFlow<UpdateCheckResult?>(null)
     val lastUpdate: StateFlow<UpdateCheckResult?> = _lastUpdate
@@ -145,7 +149,7 @@ class TrackingHost private constructor(private val appContext: Context) {
         applyLogLevel(_config.value)
         tak.listener = object : TakConnectionListener {
             override fun onStatusChanged() {
-                _serverStates.value = tak.statuses().associate { it.profileId to it.state }
+                publishServerStatuses()
             }
 
             override fun onServerConnected(profile: ServerProfile) {
@@ -181,7 +185,7 @@ class TrackingHost private constructor(private val appContext: Context) {
                 kotlinx.coroutines.delay(5_000)
                 atak.refreshInstalled()
                 atak.refreshRunning()
-                _serverStates.value = tak.statuses().associate { it.profileId to it.state }
+                publishServerStatuses()
             }
         }
     }
@@ -218,9 +222,10 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     suspend fun enroll(input: String): EnrollmentApplyResult {
         if (!_settingsUnlocked.value && isSettingsLocked) {
-            return EnrollmentApplyResult(false, "Settings are locked.")
+            return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
         }
         return enrollment.applyAsync(input, _config.value).also {
+            _lastEnrollFeedback.value = it
             if (it.success) {
                 store.save(_config.value)
                 _config.value = ensureDeviceUid(store.load())
@@ -232,9 +237,10 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     fun importSoftCertZip(bytes: ByteArray): EnrollmentApplyResult {
         if (!_settingsUnlocked.value && isSettingsLocked) {
-            return EnrollmentApplyResult(false, "Settings are locked.")
+            return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
         }
         val r = enrollment.importSoftCertZip(bytes, _config.value)
+        _lastEnrollFeedback.value = r
         if (r.success) {
             _config.value = ensureDeviceUid(store.load())
             scope.launch { applyRuntime() }
@@ -242,6 +248,13 @@ class TrackingHost private constructor(private val appContext: Context) {
         }
         return r
     }
+
+    fun clearEnrollFeedback() {
+        _lastEnrollFeedback.value = null
+    }
+
+    fun readRecentLogs(maxBytes: Int = 64 * 1024): String =
+        (log as AndroidLogger).readRecentText(maxBytes)
 
     fun setPaused(value: Boolean) {
         _paused.value = value
@@ -395,7 +408,23 @@ class TrackingHost private constructor(private val appContext: Context) {
         meshMulticast.apply(cfg.meshSa, cfg.deviceUid)
         gps.applySettings(cfg.gps)
         tak.start(cfg)
-        _serverStates.value = tak.statuses().associate { it.profileId to it.state }
+        publishServerStatuses()
+    }
+
+    private fun publishServerStatuses() {
+        _serverStatuses.value = tak.statuses().associateBy { it.profileId }
+    }
+
+    /** Matches WinTAKTracker CotStreamClient trust/cert password resolution (atakatak default). */
+    private fun resolveCertPassword(profile: ServerProfile): String {
+        val fromBlob = profile.certPasswordBlobName?.let { store.readSecret(it) }
+        return fromBlob?.takeIf { it.isNotEmpty() } ?: MartiCertMaterial.DEFAULT_P12_PASSWORD
+    }
+
+    private fun resolveTrustPassword(profile: ServerProfile): String {
+        val trustBlob = profile.trustPasswordBlobName?.let { store.readSecret(it) }
+        if (!trustBlob.isNullOrEmpty()) return trustBlob
+        return resolveCertPassword(profile)
     }
 
     private fun applyLogLevel(cfg: AppConfig) {

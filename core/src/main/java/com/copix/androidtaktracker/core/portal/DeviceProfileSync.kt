@@ -37,6 +37,10 @@ class DeviceProfileSync(
     private val credentials: ServerCertificateProvider,
     private val log: RedactedLogger,
 ) {
+    private companion object {
+        const val DOWNLOAD_ATTEMPTS = 3
+    }
+
     private val lastAttemptUtc = HashMap<String, Instant>()
     private val gate = Object()
 
@@ -157,23 +161,37 @@ class DeviceProfileSync(
             }
         }
 
-        for (url in urls.distinct()) {
-            try {
-                val client = buildHttpClient(profile, config)
-                val request = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "AndroidTAKTracker/0.1")
-                    .header("Accept", "*/*")
-                    .build()
-                client.newCall(request).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use
-                    val bytes = resp.body?.bytes()
-                    if (bytes != null && bytes.isNotEmpty()) return@withContext bytes
+        // Portal deletes the package from Marti shortly after send — a transient failure on the
+        // first pass means it's gone for good, so retry the whole URL list a few times.
+        val candidates = urls.distinct()
+        var lastFailure: String? = null
+        for (attempt in 1..DOWNLOAD_ATTEMPTS) {
+            for (url in candidates) {
+                try {
+                    val client = buildHttpClient(profile, config)
+                    val request = Request.Builder()
+                        .url(url)
+                        .header("User-Agent", "AndroidTAKTracker/0.1")
+                        .header("Accept", "*/*")
+                        .build()
+                    client.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            lastFailure = "HTTP ${resp.code}"
+                            return@use
+                        }
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null && bytes.isNotEmpty()) return@withContext bytes
+                    }
+                } catch (ex: Exception) {
+                    lastFailure = ex.javaClass.simpleName
                 }
-            } catch (_: Exception) {
-                // try next URL
             }
+            if (attempt < DOWNLOAD_ATTEMPTS) kotlinx.coroutines.delay(attempt * 2_000L)
         }
+        log.warn(
+            "Profile",
+            "Pref package download failed after $DOWNLOAD_ATTEMPTS attempts (${candidates.size} URL(s), last: ${lastFailure ?: "no response"}).",
+        )
         null
     }
 

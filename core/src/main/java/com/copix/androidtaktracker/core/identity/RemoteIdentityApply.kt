@@ -15,6 +15,11 @@ object RemoteIdentityApply {
         "Yellow", "Orange", "Red", "Purple", "Magenta", "Maroon", "Teal", "White",
     )
 
+    /** ATAK role allow-list — unknown roles are dropped, not written to CoT. */
+    val KNOWN_ROLES: List<String> = listOf(
+        "Team Member", "Team Lead", "HQ", "Sniper", "Medic", "Forward Observer", "RTO", "K9",
+    )
+
     data class Result(
         val applied: Boolean,
         val callsign: String? = null,
@@ -40,6 +45,13 @@ object RemoteIdentityApply {
         return KNOWN_TEAMS.firstOrNull { it.equals(t, ignoreCase = true) } ?: t
     }
 
+    /** Normalize ATAK role against the allow-list (case-insensitive); unknown roles → null. */
+    fun normalizeRole(role: String?): String? {
+        if (role.isNullOrBlank()) return null
+        val r = role.trim()
+        return KNOWN_ROLES.firstOrNull { it.equals(r, ignoreCase = true) }
+    }
+
     /** Write callsign/team/role into the single user identity from a Portal / enroll payload. */
     fun apply(config: AppConfig, callsign: String?, team: String?, role: String?): Result {
         val hasCallsign = !callsign.isNullOrBlank()
@@ -51,7 +63,10 @@ object RemoteIdentityApply {
 
         val normalizedCallsign = if (hasCallsign) ensureAttSuffix(callsign!!) else null
         val normalizedTeam = normalizeTeam(team)
-        val normalizedRole = role?.takeIf { it.isNotBlank() }?.trim()
+        val normalizedRole = normalizeRole(role)
+        if (normalizedCallsign == null && normalizedTeam == null && normalizedRole == null) {
+            return Result(applied = false, message = "No valid callsign, team, or role in remote configuration.")
+        }
 
         val user = config.userIdentity
         val unchanged =
@@ -73,7 +88,9 @@ object RemoteIdentityApply {
         if (normalizedCallsign != null) user.callsign = normalizedCallsign
         if (normalizedTeam != null) user.team = normalizedTeam
         if (normalizedRole != null) user.role = normalizedRole
-        user.setupPromptDismissed = false
+        // Only re-open the callsign setup prompt when a callsign actually arrived — a
+        // team/role-only push must not nag a user who previously skipped setup.
+        if (normalizedCallsign != null) user.setupPromptDismissed = false
 
         return Result(
             applied = true,

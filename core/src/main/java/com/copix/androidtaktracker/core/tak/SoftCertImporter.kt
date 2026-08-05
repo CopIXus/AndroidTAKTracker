@@ -144,7 +144,7 @@ class SoftCertImporter(
                 config,
                 prefs["locationCallsign"] ?: prefs["callsign"],
                 prefs["locationTeam"] ?: prefs["team"],
-                prefs["locationRole"] ?: prefs["role"],
+                prefs["atakRoleType"] ?: prefs["locationRole"] ?: prefs["role"],
             )
 
             log.info("Enroll", "SoftCert ZIP imported; client PKCS12 persisted for reconnect.")

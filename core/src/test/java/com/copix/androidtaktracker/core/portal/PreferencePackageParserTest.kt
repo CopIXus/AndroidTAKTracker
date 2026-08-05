@@ -100,6 +100,20 @@ class PreferencePackageParserTest {
     }
 
     @Test
+    fun apply_unknownRole_dropped() {
+        val cfg = AppConfig()
+        val result = RemoteIdentityApply.apply(cfg, "USER", "Dark Green", "Warlord")
+        assertTrue(result.applied)
+        assertTrue(cfg.userIdentity.role != "Warlord")
+    }
+
+    @Test
+    fun normalizeRole_matchesCaseInsensitive() {
+        assertEquals("Forward Observer", RemoteIdentityApply.normalizeRole("forward observer"))
+        assertEquals(null, RemoteIdentityApply.normalizeRole("Warlord"))
+    }
+
+    @Test
     fun fileShareCot_parsesPrefAnnounce() {
         val xml = """
             <event version="2.0" uid="fs-1" type="b-f-t-r" how="h-e" time="2026-01-01T00:00:00.000Z" start="2026-01-01T00:00:00.000Z" stale="2026-01-01T00:01:00.000Z">

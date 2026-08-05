@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.copix.androidtaktracker.BuildConfig
@@ -140,6 +141,10 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
     var enrollText by remember { mutableStateOf("") }
     var manualHost by remember { mutableStateOf("") }
     var manualPort by remember { mutableStateOf("8089") }
+    var manualUser by remember { mutableStateOf("") }
+    var manualPassword by remember { mutableStateOf("") }
+    var manualEnrollPort by remember { mutableStateOf("8446") }
+    var manualBusy by remember { mutableStateOf(false) }
     var localMessage by remember { mutableStateOf<String?>(null) }
     var localOk by remember { mutableStateOf(true) }
     val managed = host.mdm.managedKeys.collectAsState().value
@@ -230,6 +235,11 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             OutlinedButton(enabled = editable, onClick = onOpenQr) { Text("Scan QR") }
             OutlinedButton(enabled = editable, onClick = { softCertPicker.launch("application/zip") }) { Text("Import SoftCert") }
         }
+        Blurb(
+            "Manual server: enter host and port. With a username and password, WinTAKTracker-style " +
+                "certificate enrollment runs against the Marti API (like ATAK Quick Connect). " +
+                "Left blank, a bare profile is added — SSL servers will still need enrollment or a cert import.",
+        )
         OutlinedTextField(
             value = manualHost,
             onValueChange = { manualHost = it },
@@ -240,29 +250,83 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
         OutlinedTextField(
             value = manualPort,
             onValueChange = { manualPort = it },
-            label = { Text("Port") },
+            label = { Text("Streaming (CoT) port") },
             modifier = Modifier.fillMaxWidth(),
             enabled = editable && "serverHost" !in managed,
         )
+        OutlinedTextField(
+            value = manualUser,
+            onValueChange = { manualUser = it },
+            label = { Text("Username (optional — enables cert enrollment)") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = editable && "serverHost" !in managed,
+        )
+        OutlinedTextField(
+            value = manualPassword,
+            onValueChange = { manualPassword = it },
+            label = { Text("Password") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+            enabled = editable && "serverHost" !in managed,
+        )
+        if (manualUser.isNotBlank()) {
+            OutlinedTextField(
+                value = manualEnrollPort,
+                onValueChange = { manualEnrollPort = it },
+                label = { Text("Enrollment port") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = editable && "serverHost" !in managed,
+            )
+        }
+        if (manualBusy) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
         Button(
-            enabled = editable && "serverHost" !in managed && manualHost.isNotBlank(),
+            enabled = editable && "serverHost" !in managed && manualHost.isNotBlank() && !manualBusy,
             onClick = {
-                host.saveConfig { c ->
-                    c.servers.add(
-                        com.copix.androidtaktracker.core.config.ServerProfile(
-                            id = java.util.UUID.randomUUID().toString().replace("-", ""),
-                            displayName = manualHost.trim(),
-                            host = manualHost.trim(),
-                            port = manualPort.toIntOrNull() ?: 8089,
-                            protocol = "ssl",
-                        ),
-                    )
+                if (manualUser.isNotBlank() && manualPassword.isNotBlank()) {
+                    manualBusy = true
+                    scope.launch {
+                        try {
+                            val r = host.enrollManual(
+                                host = manualHost,
+                                username = manualUser,
+                                password = manualPassword,
+                                streamPort = manualPort.toIntOrNull() ?: 8089,
+                                enrollPort = manualEnrollPort.toIntOrNull() ?: 8446,
+                            )
+                            localMessage = r.message
+                            localOk = r.success
+                            if (r.success) {
+                                manualHost = ""
+                                manualUser = ""
+                                manualPassword = ""
+                            }
+                        } finally {
+                            manualBusy = false
+                        }
+                    }
+                } else if (manualUser.isNotBlank()) {
+                    localMessage = "Enter the password for certificate enrollment."
+                    localOk = false
+                } else {
+                    host.saveConfig { c ->
+                        c.servers.add(
+                            com.copix.androidtaktracker.core.config.ServerProfile(
+                                id = java.util.UUID.randomUUID().toString().replace("-", ""),
+                                displayName = manualHost.trim(),
+                                host = manualHost.trim(),
+                                port = manualPort.toIntOrNull() ?: 8089,
+                                protocol = "ssl",
+                            ),
+                        )
+                    }
+                    manualHost = ""
+                    localMessage = "Server added (no certificate — enroll or import one for SSL)."
+                    localOk = true
                 }
-                manualHost = ""
-                localMessage = "Server added."
-                localOk = true
             },
-        ) { Text("Add manual server") }
+        ) { Text(if (manualUser.isNotBlank()) "Enroll & add server" else "Add manual server") }
     }
 }
 @Composable
@@ -297,7 +361,7 @@ private fun IdentityScreen(host: TrackingHost) {
                 checked = config.applyRemoteIdentityFromPortal,
                 onCheckedChange = { v -> host.saveConfig { it.applyRemoteIdentityFromPortal = v } },
             )
-            Text("Apply callsign/team from Portal / device-profile sync")
+            Text("Apply callsign/team/role from Portal / device-profile sync")
         }
         Button(onClick = {
             host.saveConfig {
@@ -626,19 +690,11 @@ private fun UpdatesScreen(host: TrackingHost) {
             ) { Text("Download & install") }
         }
         installMsg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(
-                checked = config.updates.automaticallyDownloadAndInstall && !mdm,
-                onCheckedChange = { v ->
-                    host.saveConfig { it.updates.automaticallyDownloadAndInstall = v && !mdm }
-                },
-                enabled = !mdm,
-            )
-            Text(
-                if (mdm) "Auto-update disabled (MDM-managed install)"
-                else "Automatically download and install updates",
-            )
-        }
+        // No background auto-update worker exists yet — a toggle here would be a dead setting.
+        Blurb(
+            if (mdm) "Updates are MDM-managed on this device."
+            else "Updates are manual: check above, then Download & install.",
+        )
         val notes = last?.changelogNotes ?: last?.releaseNotes
         if (!notes.isNullOrBlank() && last?.updateAvailable == true) {
             Text(

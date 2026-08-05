@@ -84,6 +84,31 @@ class EnrollmentService(
         return EnrollmentApplyResult(r.success, r.message, r.profileId)
     }
 
+    /**
+     * Manual enrollment: typed host / username / password (ATAK Quick Connect style). Runs the
+     * same Marti CSR path as URL/QR enrollment without ever building a credentialed URL string
+     * that could leak into logs.
+     */
+    suspend fun enrollManual(
+        host: String,
+        username: String,
+        password: String,
+        config: AppConfig,
+        streamPort: Int = 8089,
+        enrollPort: Int = 8446,
+    ): EnrollmentApplyResult = withContext(Dispatchers.IO) {
+        val parsed = EnrollmentParseResult(
+            kind = EnrollmentKind.TAK_ENROLL,
+            host = host.trim(),
+            username = username.trim(),
+            token = password,
+            port = if (streamPort > 0) streamPort else 8089,
+            enrollmentPort = if (enrollPort > 0) enrollPort else 8446,
+            protocol = "ssl",
+        )
+        enrollWithToken(parsed, config)
+    }
+
     private fun enrollWithToken(parsed: EnrollmentParseResult, config: AppConfig): EnrollmentApplyResult {
         val host = parsed.host ?: return EnrollmentApplyResult(false, "Missing host.")
         val user = parsed.username ?: return EnrollmentApplyResult(false, "Missing username.")

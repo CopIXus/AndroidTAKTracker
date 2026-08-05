@@ -10,6 +10,8 @@ Shared feature IDs keep the sibling repos aligned. Status values: **Yes**, **Par
 | FP-GPS-IP-FALLBACK | IP geolocation (ipwho.is) delayed fallback | Yes | Yes |
 | FP-MESH-SA | UDP Mesh SA multicast 239.2.3.1:6969 | Yes | Yes |
 | FP-ENROLL-QR | QR / deep-link enrollment; Marti CSR + SoftCert PKCS12 persist (`atakatak`) | Yes | Yes |
+| FP-ENROLL-MANUAL | Manual enrollment: typed host/port/username/password → Marti CSR (Quick Connect style) | Yes | Yes |
+| FP-TAK-KEEPALIVE | Client `t-x-c-t` keepalive ping when outbound idle (NAT/firewall idle survival) | Yes | Yes |
 | FP-MDM-HEADWIND | Headwind MDM + Android Enterprise managed config | N/A | Yes |
 | FP-PORTAL-CALLSIGN | Device-profile sync + Pref-*.zip fileshare; `.wtt` / `.att` | Yes (.wtt) | Yes (.att) |
 | FP-ATAK-DEFER | Suppress PLI when ATAK is active | N/A | Yes |

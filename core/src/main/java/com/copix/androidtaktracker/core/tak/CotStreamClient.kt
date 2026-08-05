@@ -72,6 +72,13 @@ class CotStreamClient(
         private const val IDENTICAL_ERROR_LOG_INTERVAL_MS = 2 * 60 * 1000L
         private const val CONNECT_TIMEOUT_MS = 45_000
 
+        /**
+         * Client-initiated `t-x-c-t` ping interval. NAT/firewall idle timeouts are commonly
+         * 60–120s; the stationary PLI interval (default 180s) alone lets the socket go idle
+         * long enough to be silently dropped, which shows up as Connecting/Connected flapping.
+         */
+        private const val KEEPALIVE_INTERVAL_MS = 55_000L
+
         private val TAK_TIME_FORMATTER: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).withZone(ZoneOffset.UTC)
 
@@ -97,7 +104,19 @@ class CotStreamClient(
     /** When false (default), reject TLS if trust-store validation fails. When true, soft-accept. */
     @Volatile var allowInsecureTlsSoftAccept: Boolean = false
 
+    /**
+     * When true, the next [TakConnectionState.DISCONNECTED] must not auto-reconnect
+     * (profile removed / manager stop / intentional teardown).
+     */
+    @Volatile private var suppressAutoReconnect: Boolean = false
+
     var listener: CotStreamListener? = null
+
+    fun consumeSuppressAutoReconnect(): Boolean {
+        if (!suppressAutoReconnect) return false
+        suppressAutoReconnect = false
+        return true
+    }
 
     private var clientCertificate: ClientCertificateMaterial? = null
     private var trustConfig: TrustStoreConfig = TrustStoreConfig()
@@ -108,6 +127,7 @@ class CotStreamClient(
     private var output: OutputStream? = null
     private var input: InputStream? = null
     private var readJob: Job? = null
+    private var keepaliveJob: Job? = null
 
     private var backoffSeconds = 2
     private var consecutiveFailures = 0
@@ -154,10 +174,14 @@ class CotStreamClient(
             try {
                 withContext(Dispatchers.IO) {
                     val plainSocket = Socket()
+                    plainSocket.tcpNoDelay = true
+                    plainSocket.keepAlive = true
                     plainSocket.connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
 
                     val finalSocket: Socket = if (useSsl) {
                         val sslSocket = wrapSsl(plainSocket, target)
+                        sslSocket.tcpNoDelay = true
+                        sslSocket.keepAlive = true
                         sslSocket.startHandshake()
                         sslSocket
                     } else {
@@ -178,8 +202,16 @@ class CotStreamClient(
                 setState(TakConnectionState.CONNECTED)
                 listener?.onConnected(this, target)
                 readJob = scope.launch { readLoop() }
+                keepaliveJob = scope.launch { keepaliveLoop() }
                 log.info("TAK", "Connected profile=${profileLabel(target)} via ${target.protocol}.")
             } catch (ex: CancellationException) {
+                // Cancelled mid-connect: clean up so we don't leave a zombie CONNECTING state
+                // that reload()'s in-flight skip would then never touch again.
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    suppressAutoReconnect = true
+                    setState(TakConnectionState.DISCONNECTED)
+                    disconnectCore()
+                }
                 throw ex
             } catch (ex: Exception) {
                 val human = pendingServerTrustReject ?: humanizeConnectError(ex)
@@ -223,9 +255,16 @@ class CotStreamClient(
         lastSendUtc = Instant.now()
     }
 
-    suspend fun disconnect() {
-        setState(TakConnectionState.DISCONNECTED)
-        disconnectCore()
+    suspend fun disconnect(suppressAutoReconnect: Boolean = false) {
+        connectMutex.withLock {
+            // Only arm the suppress flag when a state change will actually fire the listener;
+            // otherwise it would linger and swallow the next genuine drop's auto-reconnect.
+            if (state != TakConnectionState.DISCONNECTED) {
+                this.suppressAutoReconnect = suppressAutoReconnect
+            }
+            setState(TakConnectionState.DISCONNECTED)
+            disconnectCore()
+        }
     }
 
     suspend fun reconnectWithBackoff(target: ServerProfile) {
@@ -404,6 +443,62 @@ class CotStreamClient(
         }
     }
 
+    /**
+     * Keep the socket warm through NAT/firewall idle timeouts: if nothing has been sent for
+     * ~[KEEPALIVE_INTERVAL_MS] (paused, ATAK-defer, stationary PLI interval), send a client
+     * `t-x-c-t` ping. A send failure here means the socket silently died — drop to
+     * DISCONNECTED so the manager's reconnect path brings it back.
+     */
+    private suspend fun keepaliveLoop() {
+        while (scope.isActive && state == TakConnectionState.CONNECTED) {
+            delay(KEEPALIVE_INTERVAL_MS)
+            if (state != TakConnectionState.CONNECTED) return
+
+            val last = lastSendUtc
+            if (last != null && Duration.between(last, Instant.now()).toMillis() < KEEPALIVE_INTERVAL_MS) continue
+
+            try {
+                send(buildClientPing())
+            } catch (ex: CancellationException) {
+                throw ex
+            } catch (ex: Exception) {
+                notifySendFailure(ex)
+                return
+            }
+        }
+    }
+
+    /**
+     * Outbound send failed on a socket believed CONNECTED — the stream is dead. Drop to
+     * DISCONNECTED (instead of warn-only) so the UI stops showing a stale Connected and the
+     * manager's auto-reconnect kicks in.
+     */
+    fun notifySendFailure(ex: Exception) {
+        if (state != TakConnectionState.CONNECTED) return
+        lastErrorCode = "Send failed (${ex.javaClass.simpleName})"
+        logConnectionFailure(profile, lastErrorCode!!)
+        scope.launch {
+            connectMutex.withLock {
+                if (state == TakConnectionState.CONNECTED) {
+                    setState(TakConnectionState.DISCONNECTED)
+                    disconnectCore()
+                }
+            }
+        }
+    }
+
+    private fun buildClientPing(): String {
+        val now = Instant.now()
+        val uid = "${shortId(profile.id)}-androidtaktracker-ping"
+        return StringBuilder()
+            .append("<event version=\"2.0\" uid=\"").append(CotXmlEscape.attr(uid))
+            .append("\" type=\"t-x-c-t\" how=\"h-g-i-g-o\" time=\"").append(formatTakTime(now))
+            .append("\" start=\"").append(formatTakTime(now))
+            .append("\" stale=\"").append(formatTakTime(now.plusSeconds(20)))
+            .append("\"><point lat=\"0.0\" lon=\"0.0\" hae=\"0.0\" ce=\"9999999.0\" le=\"9999999.0\"/><detail/></event>\n")
+            .toString()
+    }
+
     private fun buildPingResponse(pingXml: String): String? {
         val typeMatch = Regex("""type\s*=\s*"([^"]*)"""").find(pingXml) ?: return null
         if (!typeMatch.groupValues[1].equals("t-x-c-t", ignoreCase = true)) return null
@@ -487,6 +582,10 @@ class CotStreamClient(
     private fun shortId(id: String): String = if (id.isEmpty()) "?" else if (id.length <= 8) id else id.take(8)
 
     private suspend fun disconnectCore() {
+        // Plain cancel (no join): keepaliveLoop itself can reach here via notifySendFailure.
+        keepaliveJob?.cancel()
+        keepaliveJob = null
+
         readJob?.let {
             try {
                 it.cancelAndJoin()
@@ -505,6 +604,9 @@ class CotStreamClient(
     }
 
     private fun setState(newState: TakConnectionState) {
+        // Re-entering the same state (e.g. duplicate DISCONNECTED) must not re-fire the
+        // listener — that would schedule extra reconnect cycles.
+        if (newState == state) return
         state = newState
         listener?.onStateChanged(this, newState)
     }

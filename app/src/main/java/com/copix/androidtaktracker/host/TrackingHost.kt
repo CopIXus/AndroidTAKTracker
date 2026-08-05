@@ -180,7 +180,14 @@ class TrackingHost private constructor(private val appContext: Context) {
         }
     }
 
+    @Volatile private var started = false
+    private var mainLoopJob: kotlinx.coroutines.Job? = null
+
     fun start() {
+        // Re-entrant start (service restart without stop) must not double-register network
+        // callbacks or stack a second status-publish loop.
+        if (started) return
+        started = true
         mdm.start()
         mdm.onConfigUpdated = { scope.launch { reloadFromMdm() } }
         mdm.onPushEnrollUrl = { url ->
@@ -189,7 +196,7 @@ class TrackingHost private constructor(private val appContext: Context) {
             }
         }
         registerNetworkCallback()
-        scope.launch {
+        mainLoopJob = scope.launch {
             reloadFromMdm()
             applyRuntime()
             reporting.start()
@@ -203,6 +210,9 @@ class TrackingHost private constructor(private val appContext: Context) {
     }
 
     fun stop() {
+        started = false
+        mainLoopJob?.cancel()
+        mainLoopJob = null
         reporting.stop()
         unregisterNetworkCallback()
         scope.launch { tak.stop() }
@@ -237,6 +247,28 @@ class TrackingHost private constructor(private val appContext: Context) {
             return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
         }
         return enrollment.applyAsync(input, _config.value).also {
+            _lastEnrollFeedback.value = it
+            if (it.success) {
+                store.save(_config.value)
+                _config.value = ensureDeviceUid(store.load())
+                applyRuntime()
+                reporting.noteIdentityChanged()
+            }
+        }
+    }
+
+    /** Manual enrollment with typed credentials (ATAK Quick Connect style). */
+    suspend fun enrollManual(
+        host: String,
+        username: String,
+        password: String,
+        streamPort: Int = 8089,
+        enrollPort: Int = 8446,
+    ): EnrollmentApplyResult {
+        if (!_settingsUnlocked.value && isSettingsLocked) {
+            return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
+        }
+        return enrollment.enrollManual(host, username, password, _config.value, streamPort, enrollPort).also {
             _lastEnrollFeedback.value = it
             if (it.success) {
                 store.save(_config.value)
@@ -341,15 +373,15 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     private fun registerNetworkCallback() {
         val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        // Do NOT force-reconnect on onCapabilitiesChanged — Android fires that continuously and
+        // was tearing down healthy TAK sockets (UI flapping Connecting ↔ Connected).
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                scope.launch { tak.forceReconnect() }
+                tak.scheduleNetworkRefresh()
             }
 
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                    scope.launch { tak.forceReconnect() }
-                }
+            override fun onLost(network: Network) {
+                tak.scheduleNetworkRefresh()
             }
         }
         networkCallback = cb

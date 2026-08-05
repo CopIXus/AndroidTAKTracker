@@ -6,12 +6,14 @@ import com.copix.androidtaktracker.core.config.ServerProfile
 import com.copix.androidtaktracker.core.util.RedactedLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 data class ServerConnectionStatus(
     val profileId: String,
@@ -54,6 +56,7 @@ class TakConnectionManager(
     private val connectGates = ConcurrentHashMap<String, Mutex>()
     private val gate = Mutex()
     @Volatile private var config: AppConfig = AppConfig()
+    private val networkRefreshVersion = AtomicInteger(0)
 
     var listener: TakConnectionListener? = null
 
@@ -89,7 +92,7 @@ class TakConnectionManager(
             stale.values.toList()
         }
 
-        for (c in toDispose) c.disconnect()
+        for (c in toDispose) c.disconnect(suppressAutoReconnect = true)
 
         for (targetProfile in newConfig.servers.filter { it.id in enabledIds }) {
             val client = gate.withLock {
@@ -99,7 +102,9 @@ class TakConnectionManager(
                         override fun onStateChanged(client: CotStreamClient, state: TakConnectionState) {
                             listener?.onStatusChanged()
                             if (state == TakConnectionState.CONNECTED) listener?.onServerConnected(client.profile)
+                            // Unexpected drop only — intentional teardown sets suppressAutoReconnect.
                             if (state == TakConnectionState.DISCONNECTED) {
+                                if (client.consumeSuppressAutoReconnect()) return
                                 scope.launch { ensureReconnect(targetProfile.id) }
                             }
                         }
@@ -146,18 +151,41 @@ class TakConnectionManager(
                 sent++
             } catch (ex: Exception) {
                 log.warn("TAK", "Send failed: ${ex.javaClass.simpleName}")
+                // The socket is dead — drop the stream so the UI stops showing a stale
+                // Connected and auto-reconnect kicks in.
+                client.notifySendFailure(ex)
             }
         }
         return sent
     }
 
-    /** Drop every stream so the normal reconnect path re-establishes them (resume/network recovery). */
+    /**
+     * Coalesce noisy Android network callbacks (capabilities change fires often). After settle,
+     * [reload] keeps healthy sockets and only reconnects streams that actually dropped —
+     * mirrors WinTAKTracker DebouncedReloadAsync. Do **not** tear down connected sockets here.
+     */
+    fun scheduleNetworkRefresh() {
+        val version = networkRefreshVersion.incrementAndGet()
+        scope.launch {
+            delay(2_000)
+            if (version != networkRefreshVersion.get()) return@launch
+            log.info("TAK", "Network change settled — refreshing connections.")
+            try {
+                reload(config)
+            } catch (ex: Exception) {
+                log.warn("TAK", "Network refresh failed: ${ex.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** Drop every stream so the normal reconnect path re-establishes them (explicit recovery). */
     suspend fun forceReconnect() {
         val all = gate.withLock { clients.values.toList() }
         log.info("TAK", "Force reconnect of ${all.size} stream(s) (resume/network recovery).")
         for (client in all) {
             try {
-                client.disconnect()
+                // Allow DISCONNECTED → ensureReconnect so streams come back.
+                client.disconnect(suppressAutoReconnect = false)
             } catch (ex: Exception) {
                 log.warn("TAK", "Force disconnect failed: ${ex.javaClass.simpleName}")
             }
@@ -188,7 +216,7 @@ class TakConnectionManager(
             connectGates.remove(profileId)
             clients.remove(profileId)
         }
-        client?.disconnect()
+        client?.disconnect(suppressAutoReconnect = true)
 
         deleteProfileFiles(target)
         currentConfig.servers.removeAll { it.id == profileId }
@@ -208,7 +236,7 @@ class TakConnectionManager(
             connectGates.clear()
             values
         }
-        for (c in all) c.disconnect()
+        for (c in all) c.disconnect(suppressAutoReconnect = true)
     }
 
     private suspend fun connectOrReconnect(target: ServerProfile) {
@@ -245,7 +273,14 @@ class TakConnectionManager(
         val target = config.servers.firstOrNull { it.id == profileId && it.enabled } ?: return
         val client = gate.withLock { clients[profileId] } ?: return
         if (client.autoReconnectSuspended) return
-        if (client.state == TakConnectionState.CONNECTED || client.state == TakConnectionState.CONNECTING) return
+        // RECONNECTING means a backoff loop is already in flight — restarting it here would
+        // cancel and reset the backoff, producing extra Connecting cycles in the UI.
+        if (client.state == TakConnectionState.CONNECTED ||
+            client.state == TakConnectionState.CONNECTING ||
+            client.state == TakConnectionState.RECONNECTING
+        ) {
+            return
+        }
 
         cancelReconnect(profileId)
         val job = scope.launch { client.reconnectWithBackoff(target) }

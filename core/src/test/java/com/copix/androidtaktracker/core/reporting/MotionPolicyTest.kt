@@ -68,6 +68,7 @@ class MotionPolicyTest {
         assertEquals(2.0, MotionPolicy.batteryIntervalMultiplier(10, charging = false), 0.0)
         assertEquals(360L, MotionPolicy.applyBatteryMultiplier(180, 10, charging = false))
         assertEquals(5L, MotionPolicy.applyBatteryMultiplier(5, 10, charging = false))
+        assertEquals(20L, MotionPolicy.applyBatteryMultiplier(10, 10, charging = false))
     }
 
     @Test

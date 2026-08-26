@@ -103,6 +103,8 @@ object MotionPolicy {
     }
 
     fun applyBatteryMultiplier(intervalSeconds: Long, batteryPercent: Int?, charging: Boolean): Long {
+        // Driving already uses the 5s floor — do not stretch that; only slow keepalives.
+        if (intervalSeconds <= MIN_INTERVAL_SECONDS) return MIN_INTERVAL_SECONDS
         val scaled = intervalSeconds * batteryIntervalMultiplier(batteryPercent, charging)
         return maxOf(MIN_INTERVAL_SECONDS, scaled.toLong())
     }

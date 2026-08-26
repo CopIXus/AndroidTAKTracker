@@ -9,18 +9,23 @@ import android.os.Build
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ServerProfile
 import com.copix.androidtaktracker.core.identity.RemoteIdentityApply
+import com.copix.androidtaktracker.core.mdm.MdmSettingsApply
+import com.copix.androidtaktracker.core.tak.EnrollmentApplyResult
 import com.copix.androidtaktracker.core.tak.EnrollmentService
 import com.copix.androidtaktracker.core.util.RedactedLogger
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
 
+data class MdmApplyResult(
+    val configChanged: Boolean,
+    val enrollResult: EnrollmentApplyResult? = null,
+)
+
 /**
- * Reads Android Enterprise managed configurations (RestrictionsManager) and optional
- * Headwind MDM preference keys via reflection so the Headwind library is not a hard dependency.
+ * Reads Android Enterprise managed configurations ([RestrictionsManager]) and Headwind
+ * Application Settings via a bound [HeadwindAgentClient] (Plugin API).
  *
  * Precedence: MDM > Portal > local/QR.
  */
@@ -28,7 +33,7 @@ class MdmConfigBridge(
     private val context: Context,
     private val log: RedactedLogger,
     private val enrollment: EnrollmentService,
-    private val scope: CoroutineScope,
+    @Suppress("unused") private val scope: CoroutineScope,
 ) {
     private val _managedKeys = MutableStateFlow<Set<String>>(emptySet())
     val managedKeys: StateFlow<Set<String>> = _managedKeys
@@ -39,6 +44,13 @@ class MdmConfigBridge(
     private var pauseRequested = false
     fun isRemotePauseRequested(): Boolean = pauseRequested
 
+    fun isKeyManaged(key: String): Boolean = key in _managedKeys.value
+
+    /** True when Headwind is present or a callsign key was pushed (Portal must not overwrite). */
+    fun ownsIdentity(): Boolean =
+        _mdmPresent.value || "callsign" in _managedKeys.value ||
+            "team" in _managedKeys.value || "role" in _managedKeys.value
+
     private val restrictionsReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             onConfigUpdated?.invoke()
@@ -48,6 +60,16 @@ class MdmConfigBridge(
     var onConfigUpdated: (() -> Unit)? = null
     /** Invoked when a Headwind `attracker-config` push carries an enroll URL / JSON fragment. */
     var onPushEnrollUrl: ((String) -> Unit)? = null
+
+    private val headwind = HeadwindAgentClient(
+        context = context,
+        log = log,
+        onConnected = {
+            markPresent()
+            onConfigUpdated?.invoke()
+        },
+        onDisconnected = { },
+    )
 
     private val pushReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -78,20 +100,29 @@ class MdmConfigBridge(
             @Suppress("UnspecifiedRegisterReceiverFlag")
             context.registerReceiver(restrictionsReceiver, filter)
         }
-        // Headwind config + custom push types (attracker-config / attracker-pause).
         try {
-            val hwFilter = IntentFilter("com.hmdm.push.configUpdated")
+            val hwFilter = IntentFilter(HeadwindAgentClient.NOTIFICATION_CONFIG_UPDATED)
             hwFilter.addAction("com.hmdm.push.attracker-config")
             hwFilter.addAction("com.hmdm.push.attracker-pause")
             if (Build.VERSION.SDK_INT >= 33) {
-                context.registerReceiver(pushReceiver, hwFilter, Context.RECEIVER_NOT_EXPORTED)
+                context.registerReceiver(pushReceiver, hwFilter, Context.RECEIVER_EXPORTED)
             } else {
                 @Suppress("UnspecifiedRegisterReceiverFlag")
                 context.registerReceiver(pushReceiver, hwFilter)
             }
         } catch (_: Exception) { /* ignore */ }
-        detectHeadwind()
+
+        if (headwind.isAgentInstalled()) markPresent()
+        if (!headwind.connect() && !headwind.isAgentInstalled()) {
+            log.info("MDM", "Headwind agent not installed — Enterprise restrictions still apply.")
+        }
         tryRegisterHeadwindPushHandler()
+    }
+
+    fun stop() {
+        headwind.disconnect()
+        try { context.unregisterReceiver(restrictionsReceiver) } catch (_: Exception) {}
+        try { context.unregisterReceiver(pushReceiver) } catch (_: Exception) {}
     }
 
     private fun handleConfigPushPayload(payload: String) {
@@ -112,13 +143,13 @@ class MdmConfigBridge(
     }
 
     /**
-     * Best-effort Headwind [MDMPushHandler] registration via reflection (no hard dependency).
-     * Custom types: `attracker-config` (enroll URL / JSON fragment) and `attracker-pause`.
+     * Best-effort [com.hmdm.MDMPushHandler] registration when a future Headwind AAR is on
+     * the classpath. The bound Plugin API + `configUpdated` broadcast are the primary path.
      */
     private fun tryRegisterHeadwindPushHandler() {
         try {
-            val headwind = Class.forName("com.hmdm.HeadwindMDM")
-            val getInstance = headwind.methods.firstOrNull {
+            val headwindCls = Class.forName("com.hmdm.HeadwindMDM")
+            val getInstance = headwindCls.methods.firstOrNull {
                 it.name == "getInstance" && it.parameterCount == 0
             } ?: return
             val instance = getInstance.invoke(null) ?: return
@@ -149,71 +180,82 @@ class MdmConfigBridge(
                     m.parameterTypes.any { it.name.contains("MDMPush") }
             }
             register?.invoke(instance, proxy)
-            _mdmPresent.value = true
+            markPresent()
         } catch (_: Exception) {
-            // Headwind not on classpath / API shape differs — Enterprise restrictions still work.
+            // Official Headwind Java helper is not on the classpath — AIDL bind is enough.
         }
-    }
-
-    fun stop() {
-        try { context.unregisterReceiver(restrictionsReceiver) } catch (_: Exception) {}
-        try { context.unregisterReceiver(pushReceiver) } catch (_: Exception) {}
     }
 
     /**
-     * Apply managed config onto [config]. Returns true if anything changed.
+     * Apply managed config onto [config]. Enrollment uses [EnrollmentService.enrollManual]
+     * so credentials never land in a constructed URL.
      */
-    fun applyManagedConfig(config: AppConfig): Boolean {
+    suspend fun applyManagedConfig(config: AppConfig): MdmApplyResult {
         val bundle = readRestrictions()
         val hw = readHeadwindPrefs()
-        val keys = linkedMapOf<String, String>()
-        for ((k, v) in bundle) keys[k] = v
-        for ((k, v) in hw) if (k !in keys) keys[k] = v
+        val merged = linkedMapOf<String, String>()
+        for ((k, v) in bundle) merged[k] = v
+        for ((k, v) in hw) if (k !in merged) merged[k] = v
 
+        val keys = MdmSettingsApply.normalize(merged, headwind.getDeviceId())
         _managedKeys.value = keys.keys.toSet()
-        if (keys.isEmpty()) return false
+        if (keys.isNotEmpty()) markPresent()
+        if (keys.isEmpty()) return MdmApplyResult(false)
 
         var changed = false
-        keys["enrollUrl"]?.let { url ->
-            scope.launch(Dispatchers.IO) {
-                enrollment.applyAsync(url, config)
-            }
+        var enrollResult: EnrollmentApplyResult? = null
+
+        if (RemoteIdentityApply.apply(config, keys["callsign"], keys["team"], keys["role"]).applied) {
             changed = true
+            config.userIdentity.setupPromptDismissed = true
         }
+
+        keys["enrollUrl"]?.let { url ->
+            enrollResult = enrollment.applyAsync(url, config)
+            if (enrollResult?.success == true) changed = true
+        }
+
         val host = keys["serverHost"]
-        if (!host.isNullOrBlank()) {
-            val port = keys["serverPort"]?.toIntOrNull() ?: 8089
+        if (!host.isNullOrBlank() && enrollResult == null) {
+            val port = MdmSettingsApply.parsePort(keys["serverPort"], 8089)
+            val enrollPort = MdmSettingsApply.parsePort(keys["enrollPort"], 8446)
             val protocol = keys["serverProtocol"] ?: "ssl"
             val existing = config.servers.firstOrNull { it.host.equals(host, true) }
             val user = keys["username"]
-            val token = keys["token"]
-            if (existing == null && !user.isNullOrBlank() && !token.isNullOrBlank()) {
-                // Full enroll mints/stores client cert + token via Marti CSR when possible.
-                val enroll =
-                    "opentaktracker://enroll?host=$host&username=$user&token=$token" +
-                        "&port=$port&protocol=$protocol"
-                scope.launch(Dispatchers.IO) { enrollment.applyAsync(enroll, config) }
-                changed = true
-            } else if (existing == null) {
-                config.servers.add(
-                    ServerProfile(
-                        id = UUID.randomUUID().toString().replace("-", ""),
-                        displayName = keys["serverName"] ?: host,
+            val secret = MdmSettingsApply.credential(keys)
+            when {
+                MdmSettingsApply.shouldEnroll(existing, user, secret) -> {
+                    enrollResult = enrollment.enrollManual(
                         host = host,
-                        port = port,
-                        protocol = protocol,
-                        username = user,
-                    ),
-                )
-                changed = true
-            } else {
-                if (existing.port != port) { existing.port = port; changed = true }
-                if (existing.protocol != protocol) { existing.protocol = protocol; changed = true }
+                        username = user!!,
+                        password = secret!!,
+                        config = config,
+                        streamPort = port,
+                        enrollPort = enrollPort,
+                    )
+                    if (enrollResult?.success == true) changed = true
+                    else log.warn("MDM", "Managed enroll failed: ${enrollResult?.message}")
+                }
+                existing == null -> {
+                    config.servers.add(
+                        ServerProfile(
+                            id = UUID.randomUUID().toString().replace("-", ""),
+                            displayName = keys["serverName"] ?: host,
+                            host = host,
+                            port = port,
+                            protocol = protocol,
+                            username = user,
+                        ),
+                    )
+                    changed = true
+                }
+                else -> {
+                    if (existing.port != port) { existing.port = port; changed = true }
+                    if (existing.protocol != protocol) { existing.protocol = protocol; changed = true }
+                }
             }
         }
-        if (RemoteIdentityApply.apply(config, keys["callsign"], keys["team"], keys["role"]).applied) {
-            changed = true
-        }
+
         keys["reportingStrategy"]?.let {
             if (config.reporting.strategy != it) {
                 config.reporting.strategy = it
@@ -229,10 +271,8 @@ class MdmConfigBridge(
         keys["pause"]?.let {
             pauseRequested = it.equals("true", true) || it == "1"
         }
-        return changed
+        return MdmApplyResult(changed, enrollResult)
     }
-
-    fun isKeyManaged(key: String): Boolean = key in _managedKeys.value
 
     private fun readRestrictions(): Map<String, String> {
         val rm = context.getSystemService(Context.RESTRICTIONS_SERVICE) as? RestrictionsManager
@@ -243,36 +283,22 @@ class MdmConfigBridge(
             val v = b.get(k)?.toString()
             if (!v.isNullOrBlank()) map[k] = v
         }
-        if (map.isNotEmpty()) _mdmPresent.value = true
+        if (map.isNotEmpty()) markPresent()
         return map
     }
 
     private fun readHeadwindPrefs(): Map<String, String> {
-        // Reflection: MDMService.Preferences.get(key, default)
-        return try {
-            val clazz = Class.forName("com.hmdm.MDMService\$Preferences")
-            val get = clazz.getMethod("get", String::class.java, String::class.java)
-            val keys = listOf(
-                "enrollUrl", "serverHost", "serverPort", "serverProtocol", "serverName",
-                "username", "token", "callsign", "team", "role", "reportingStrategy",
-                "deferToAtak", "pause",
-            )
-            val map = linkedMapOf<String, String>()
-            for (k in keys) {
-                val v = get.invoke(null, k, "") as? String
-                if (!v.isNullOrBlank()) map[k] = v
-            }
-            if (map.isNotEmpty()) _mdmPresent.value = true
-            map
-        } catch (_: Exception) {
-            emptyMap()
+        if (!headwind.isConnected) return emptyMap()
+        val map = linkedMapOf<String, String>()
+        for (k in MdmSettingsApply.PREFERENCE_KEYS) {
+            val v = headwind.getPreference(k)
+            if (!v.isNullOrBlank()) map[k] = v
         }
+        if (map.isNotEmpty()) markPresent()
+        return map
     }
 
-    private fun detectHeadwind() {
-        try {
-            Class.forName("com.hmdm.HeadwindMDM")
-            _mdmPresent.value = true
-        } catch (_: Exception) { /* not installed */ }
+    private fun markPresent() {
+        _mdmPresent.value = true
     }
 }

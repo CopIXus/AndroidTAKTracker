@@ -156,8 +156,7 @@ class TrackingHost private constructor(private val appContext: Context) {
                 reporting.requestAsap()
                 scope.launch {
                     // MDM owns identity when those keys are managed — skip Portal overwrite.
-                    val managed = mdm.managedKeys.value
-                    if ("callsign" in managed || "team" in managed || "role" in managed) return@launch
+                    if (mdm.ownsIdentity()) return@launch
                     portal.trySync(profile, _config.value) { cfg ->
                         store.save(cfg)
                         _config.value = ensureDeviceUid(store.load())
@@ -168,8 +167,7 @@ class TrackingHost private constructor(private val appContext: Context) {
 
             override fun onFileShareCot(profile: ServerProfile, cotXml: String) {
                 scope.launch {
-                    val managed = mdm.managedKeys.value
-                    if ("callsign" in managed || "team" in managed || "role" in managed) return@launch
+                    if (mdm.ownsIdentity()) return@launch
                     portal.tryHandleFileShareCot(profile, _config.value, cotXml) { cfg ->
                         store.save(cfg)
                         _config.value = ensureDeviceUid(store.deepCopy(cfg))
@@ -438,7 +436,9 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     private suspend fun reloadFromMdm() {
         val cfg = _config.value
-        if (mdm.applyManagedConfig(cfg)) {
+        val result = mdm.applyManagedConfig(cfg)
+        result.enrollResult?.let { _lastEnrollFeedback.value = it }
+        if (result.configChanged) {
             store.save(cfg)
             _config.value = ensureDeviceUid(store.load())
             applyRuntime()

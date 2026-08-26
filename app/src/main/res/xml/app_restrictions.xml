@@ -20,8 +20,26 @@
         android:restrictionType="string"
         android:defaultValue="ssl" />
     <restriction
+        android:key="username"
+        android:title="@string/restriction_username_title"
+        android:restrictionType="string" />
+    <restriction
+        android:key="password"
+        android:title="@string/restriction_password_title"
+        android:restrictionType="string" />
+    <restriction
+        android:key="token"
+        android:title="@string/restriction_token_title"
+        android:restrictionType="string" />
+    <restriction
+        android:key="enrollPort"
+        android:title="@string/restriction_enroll_port_title"
+        android:restrictionType="string"
+        android:defaultValue="8446" />
+    <restriction
         android:key="callsign"
         android:title="@string/restriction_callsign_title"
+        android:description="@string/restriction_callsign_desc"
         android:restrictionType="string" />
     <restriction
         android:key="team"

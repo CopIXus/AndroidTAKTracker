@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Headwind MDM Application Settings bind (`com.hmdm.action.Connect`): `password` aliases `token`, Marti enroll via `enrollManual`, callsign from `%NUMBER%` / `mdmDeviceId` / device ID; skip first-run wizard when MDM granted tracking permissions
 - Portal Pref-*.zip preference packages (MANIFEST + certs/config.pref) via fileshare CoT / Marti sync download, matching ATAK onReceiveImport
 
 ### Fixed

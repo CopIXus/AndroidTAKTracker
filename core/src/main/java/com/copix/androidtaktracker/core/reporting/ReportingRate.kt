@@ -6,30 +6,44 @@ import java.time.Duration
 enum class ReportingPath { RELIABLE, UNRELIABLE }
 
 interface ReportingRate {
-    fun getInterval(path: ReportingPath, speedMph: Double): Duration
+    fun getInterval(path: ReportingPath, speedMph: Double, metersSinceLastPli: Double? = null): Duration
     fun shouldReportAsap(previousAltM: Double?, currentAltM: Double?, previousSpeedMph: Double?, currentSpeedMph: Double): Boolean
     fun getStale(interval: Duration): Duration
 }
 
 /** ATAK-style Dynamic reporting rate (reliable vs unreliable paths). */
 class AdaptiveReportingRate(private val settings: ReportingSettings) : ReportingRate {
-    override fun getInterval(path: ReportingPath, speedMph: Double): Duration {
-        var speed = speedMph
-        if (speed.isNaN() || speed.isInfinite()) speed = 0.0
+    override fun getInterval(path: ReportingPath, speedMph: Double, metersSinceLastPli: Double?): Duration {
+        val speed = MotionPolicy.sanitizeSpeedMph(speedMph)
 
         val stationary = if (path == ReportingPath.RELIABLE) settings.reliableStationarySeconds else settings.unreliableStationarySeconds
         val min = if (path == ReportingPath.RELIABLE) settings.reliableMinSeconds else settings.unreliableMinSeconds
         val maxMove = if (path == ReportingPath.RELIABLE) settings.reliableMaxMoveSeconds else settings.unreliableMaxMoveSeconds
 
-        // Floor at 5s so Dynamic rates never hammer TAK/mesh.
-        if (speed < 1.0) return Duration.ofSeconds(maxOf(5, stationary).toLong())
-        if (speed >= 30.0) return Duration.ofSeconds(maxOf(5, min).toLong())
+        val significant = settings.significantMoveMeters
+        if (MotionPolicy.treatAsStationary(speed, metersSinceLastPli, significant)) {
+            return Duration.ofSeconds(maxOf(MotionPolicy.MIN_INTERVAL_SECONDS, stationary.toLong()))
+        }
 
-        // Linear interpolate 1-30 mph: maxMove -> min
-        val t = (speed - 1.0) / 29.0
-        var seconds = maxMove + (min - maxMove) * t
-        if (seconds.isNaN() || seconds.isInfinite()) seconds = stationary.toDouble()
-        return Duration.ofSeconds(maxOf(5.0, seconds).toLong())
+        // Floor at 5s so Dynamic rates never hammer TAK/mesh.
+        if (speed >= MotionPolicy.FAST_SPEED_MPH) {
+            return Duration.ofSeconds(maxOf(MotionPolicy.MIN_INTERVAL_SECONDS, min.toLong()))
+        }
+
+        val slowMove = MotionPolicy.slowMoveSeconds(stationary, maxMove)
+        val seconds = if (speed < MotionPolicy.WALKING_SPEED_MPH) {
+            // 2.5–8 mph: slowMove → maxMove (walk, do not treat as a vehicle)
+            val span = MotionPolicy.WALKING_SPEED_MPH - MotionPolicy.STATIONARY_SPEED_MPH
+            val t = ((speed - MotionPolicy.STATIONARY_SPEED_MPH) / span).coerceIn(0.0, 1.0)
+            slowMove + (maxMove - slowMove) * t
+        } else {
+            // 8–30 mph: maxMove → min
+            val span = MotionPolicy.FAST_SPEED_MPH - MotionPolicy.WALKING_SPEED_MPH
+            val t = ((speed - MotionPolicy.WALKING_SPEED_MPH) / span).coerceIn(0.0, 1.0)
+            maxMove + (min - maxMove) * t
+        }
+        val safe = if (seconds.isNaN() || seconds.isInfinite()) stationary.toDouble() else seconds
+        return Duration.ofSeconds(maxOf(MotionPolicy.MIN_INTERVAL_SECONDS.toDouble(), safe).toLong())
     }
 
     override fun shouldReportAsap(
@@ -43,13 +57,14 @@ class AdaptiveReportingRate(private val settings: ReportingSettings) : Reporting
         return false
     }
 
-    override fun getStale(interval: Duration): Duration = interval.multipliedBy(2).plusSeconds(15)
+    override fun getStale(interval: Duration): Duration =
+        Duration.ofSeconds(MotionPolicy.staleDurationSeconds(interval.seconds.coerceAtLeast(0)))
 }
 
 /** Fixed-interval reporting for both paths. */
 class ConstantReportingRate(private val settings: ReportingSettings) : ReportingRate {
-    override fun getInterval(path: ReportingPath, speedMph: Double): Duration =
-        Duration.ofSeconds(maxOf(5, settings.constantIntervalSeconds).toLong())
+    override fun getInterval(path: ReportingPath, speedMph: Double, metersSinceLastPli: Double?): Duration =
+        Duration.ofSeconds(maxOf(MotionPolicy.MIN_INTERVAL_SECONDS, settings.constantIntervalSeconds.toLong()))
 
     override fun shouldReportAsap(
         previousAltM: Double?,
@@ -58,7 +73,8 @@ class ConstantReportingRate(private val settings: ReportingSettings) : Reporting
         currentSpeedMph: Double,
     ): Boolean = false
 
-    override fun getStale(interval: Duration): Duration = interval.multipliedBy(2).plusSeconds(15)
+    override fun getStale(interval: Duration): Duration =
+        Duration.ofSeconds(MotionPolicy.staleDurationSeconds(interval.seconds.coerceAtLeast(0)))
 }
 
 object ReportingRateFactory {

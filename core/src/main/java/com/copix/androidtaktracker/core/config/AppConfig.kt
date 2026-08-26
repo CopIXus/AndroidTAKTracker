@@ -100,6 +100,11 @@ data class GpsSettings(
     var minIntervalMs: Long = 2_000,
     /** FusedLocationProviderClient minimum update distance, meters (0 = time-based only). */
     var minDistanceMeters: Float = 0f,
+    /**
+     * When true (default), step GNSS down to balanced power while still or walking and
+     * snap back to high accuracy on a real move. Does not change Constant CoT cadence.
+     */
+    var adaptToMotion: Boolean = true,
 )
 
 @Serializable
@@ -113,6 +118,11 @@ data class ReportingSettings(
     var unreliableMinSeconds: Int = 5,
     var unreliableMaxMoveSeconds: Int = 20,
     var constantIntervalSeconds: Int = 10,
+    /**
+     * Meters of real relocation required before Dynamic treats the operator as moving.
+     * Filters GPS jitter so a parked vehicle does not look like 2 mph of motion.
+     */
+    var significantMoveMeters: Double = 20.0,
     /**
      * When true, add "Device: {model}" to CoT detail/remarks so peers can see which device
      * reported (not a bare model string — some Portal UIs mis-read bare remarks as callsign).

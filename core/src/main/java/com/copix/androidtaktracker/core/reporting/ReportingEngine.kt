@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.time.Duration
 import java.time.Instant
 
 class ReportingEngine(
@@ -26,6 +27,7 @@ class ReportingEngine(
     private val paused: () -> Boolean,
     private val deferringToAtak: () -> Boolean,
     private val batteryPercent: () -> Int?,
+    private val charging: () -> Boolean = { false },
     private val deviceModel: () -> String,
     private val osVersion: () -> String,
     private val appVersion: () -> String,
@@ -40,6 +42,8 @@ class ReportingEngine(
 
     private var lastSpeedMph = 0.0
     private var lastAlt = 0.0
+    private var lastSentLat = Double.NaN
+    private var lastSentLon = Double.NaN
 
     fun start() {
         if (loopJob?.isActive == true) return
@@ -87,8 +91,23 @@ class ReportingEngine(
         val rate = ReportingRateFactory.create(config.reporting)
         val path = if (connected) ReportingPath.RELIABLE else ReportingPath.UNRELIABLE
         val speedMph = fix?.speedMph ?: 0.0
-        val interval = rate.getInterval(path, speedMph)
-        val intervalSec = interval.seconds.coerceAtLeast(5)
+        val moved = metersSinceLastPli(fix)
+        val significant = config.reporting.significantMoveMeters
+        if (moved != null && moved >= significant && lastPliEpochMs > 0L &&
+            System.currentTimeMillis() - lastPliEpochMs >= 4_000L
+        ) {
+            // First real relocation after lingering — refresh the map icon promptly.
+            asap = true
+        }
+        val interval = rate.getInterval(path, speedMph, moved)
+        var intervalSec = interval.seconds.coerceAtLeast(MotionPolicy.MIN_INTERVAL_SECONDS)
+        if (!config.reporting.strategy.equals("Constant", ignoreCase = true)) {
+            intervalSec = MotionPolicy.applyBatteryMultiplier(
+                intervalSec,
+                batteryPercent(),
+                charging(),
+            )
+        }
         val due = asap || identityDirty ||
             lastPliEpochMs == 0L ||
             System.currentTimeMillis() - lastPliEpochMs >= intervalSec * 1000L
@@ -104,7 +123,7 @@ class ReportingEngine(
         )
         val active = IdentityResolver.resolve(config, deviceModel())
         val battery = batteryPercent()
-        val stale = rate.getStale(interval)
+        val stale = rate.getStale(Duration.ofSeconds(intervalSec))
         val model = deviceModel()
         val os = osVersion()
 
@@ -131,10 +150,17 @@ class ReportingEngine(
             identityDirty = false
             lastSpeedMph = useFix.speedMph
             lastAlt = useFix.altitudeMeters ?: 0.0
+            lastSentLat = useFix.latitude
+            lastSentLon = useFix.longitude
         }
 
         val alt = fix?.altitudeMeters
         if (rate.shouldReportAsap(lastAlt, alt, lastSpeedMph, speedMph)) asap = true
+    }
+
+    private fun metersSinceLastPli(fix: GpsFix?): Double? {
+        if (fix == null || lastSentLat.isNaN() || lastSentLon.isNaN()) return null
+        return MotionPolicy.haversineMeters(lastSentLat, lastSentLon, fix.latitude, fix.longitude)
     }
 
     private fun shouldSendMesh(config: AppConfig, connected: Boolean): Boolean {

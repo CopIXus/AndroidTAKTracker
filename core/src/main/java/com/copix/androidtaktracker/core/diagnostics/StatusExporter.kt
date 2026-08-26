@@ -39,6 +39,7 @@ object StatusExporter {
             put("team", config.userIdentity.team.ifBlank { config.deviceIdentity.team })
             put("role", config.userIdentity.role.ifBlank { config.deviceIdentity.role })
             put("reportingStrategy", config.reporting.strategy)
+            put("adaptGpsToMotion", config.gps.adaptToMotion)
             put("meshSaEnabled", config.meshSa.enabled)
             put("deferToAtak", config.atak.deferToAtak)
             if (lastPliEpochMs > 0) {

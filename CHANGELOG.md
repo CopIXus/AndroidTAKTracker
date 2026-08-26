@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Dynamic CoT treats GPS jitter and slow walking as low-rate keepalives so the map icon stays fresh without a 2-second radio blast
+- Fused GPS steps down to balanced power when still or walking and snaps back to high accuracy on a real move (can be turned off under GPS)
+- GNSS stops while tracking is paused or ATAK owns presence
+- Low battery stretches Dynamic intervals; charging restores the normal cadence
+- CoT stale floor is 90s so a delayed send cannot drop the icon
+
 ### Added
 
 - Portal Pref-*.zip preference packages (MANIFEST + certs/config.pref) via fileshare CoT / Marti sync download, matching ATAK onReceiveImport

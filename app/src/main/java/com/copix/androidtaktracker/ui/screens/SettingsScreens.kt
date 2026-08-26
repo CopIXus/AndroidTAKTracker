@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.copix.androidtaktracker.BuildConfig
 import com.copix.androidtaktracker.core.identity.IdentityResolver
+import com.copix.androidtaktracker.core.reporting.GpsDuty
 import com.copix.androidtaktracker.core.tak.TakConnectionState
 import com.copix.androidtaktracker.host.TrackingHost
 import com.copix.androidtaktracker.ui.SettingsSection
@@ -92,6 +93,7 @@ fun SectionContent(section: SettingsSection, host: TrackingHost, onOpenQr: () ->
 private fun StatusScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     val fix by host.gps.fix.collectAsState()
+    val gpsDuty by host.gps.duty.collectAsState()
     val paused by host.paused.collectAsState()
     val statuses by host.serverStatuses.collectAsState()
     val identity = IdentityResolver.resolve(config)
@@ -108,6 +110,7 @@ private fun StatusScreen(host: TrackingHost) {
             Chip("Mode", if (paused) "Paused" else if (defer) "Defer ATAK" else "Tracking")
             Chip("Callsign", identity.callsign)
             Chip("GPS", fix?.source?.name ?: "No fix")
+            Chip("GPS duty", gpsDutyLabel(gpsDuty, config.gps.adaptToMotion))
             Chip("Servers", "$connected connected")
             Chip("Last PLI", formatTime(host.lastPliEpochMs))
         }
@@ -383,9 +386,21 @@ private fun IdentityScreen(host: TrackingHost) {
 private fun GpsScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     val fix by host.gps.fix.collectAsState()
+    val gpsDuty by host.gps.duty.collectAsState()
     val ctx = LocalContext.current
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Fused location (GNSS/Wi‑Fi). Optional IP geolocation fallback via ipwho.is.")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = config.gps.adaptToMotion,
+                onCheckedChange = { v -> host.saveConfig { it.gps.adaptToMotion = v } },
+            )
+            Text("Adapt GPS to motion (saves battery)")
+        }
+        Blurb(
+            "When still or walking slowly, GNSS steps down from high accuracy. A real move " +
+                "or driving snaps back immediately. Pause and ATAK-defer also stop the GPS radio.",
+        )
         EnumDropdown(
             "Source priority",
             config.gps.sourcePriority,
@@ -408,6 +423,7 @@ private fun GpsScreen(host: TrackingHost) {
             modifier = Modifier.fillMaxWidth(),
         )
         Text("Current: ${fix?.let { "${it.latitude}, ${it.longitude} (${it.source})" } ?: "none"}")
+        Text("GPS duty: ${gpsDutyLabel(gpsDuty, config.gps.adaptToMotion)}")
         TextButton(onClick = {
             ctx.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
         }) { Text("Open location settings") }
@@ -419,6 +435,12 @@ private fun GpsScreen(host: TrackingHost) {
 private fun ReportingScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Blurb(
+            "Dynamic sends CoT less often when you are still or only shifting a few meters " +
+                "(GPS jitter). Walking is slower than driving. Stale time stays long enough " +
+                "that CloudTAK / ATAK keep your icon on the map between sends. Low battery " +
+                "stretches Dynamic intervals; charging restores the normal cadence.",
+        )
         EnumDropdown(
             "Strategy",
             config.reporting.strategy,
@@ -724,6 +746,15 @@ private fun AboutScreen() {
         Text("AndroidTAKTracker Free Application License 1.0")
         Blurb("Sibling of WinTAKTracker. Tracking-only — no COP, no built-in video.")
         LinkButton("GitHub", "https://github.com/CopIXus/AndroidTAKTracker")
+    }
+}
+
+private fun gpsDutyLabel(duty: GpsDuty, adaptToMotion: Boolean): String {
+    if (!adaptToMotion) return "high (locked)"
+    return when (duty) {
+        GpsDuty.HIGH -> "high"
+        GpsDuty.BALANCED -> "balanced"
+        GpsDuty.LOW -> "low (still)"
     }
 }
 

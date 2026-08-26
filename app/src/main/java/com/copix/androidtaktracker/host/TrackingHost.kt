@@ -118,6 +118,7 @@ class TrackingHost private constructor(private val appContext: Context) {
         paused = { _paused.value || mdm.isRemotePauseRequested() },
         deferringToAtak = { atak.shouldDefer(_config.value.atak.deferToAtak) },
         batteryPercent = { readBattery() },
+        charging = { isCharging() },
         deviceModel = { Build.MODEL ?: "Android" },
         osVersion = { "Android ${Build.VERSION.RELEASE}" },
         appVersion = { BuildConfig.VERSION_NAME },
@@ -181,6 +182,7 @@ class TrackingHost private constructor(private val appContext: Context) {
     }
 
     @Volatile private var started = false
+    @Volatile private var gpsSampling = false
     private var mainLoopJob: kotlinx.coroutines.Job? = null
 
     fun start() {
@@ -204,6 +206,7 @@ class TrackingHost private constructor(private val appContext: Context) {
                 kotlinx.coroutines.delay(5_000)
                 atak.refreshInstalled()
                 atak.refreshRunning()
+                syncGpsSampling()
                 publishServerStatuses()
             }
         }
@@ -217,6 +220,7 @@ class TrackingHost private constructor(private val appContext: Context) {
         unregisterNetworkCallback()
         scope.launch { tak.stop() }
         gps.stop()
+        gpsSampling = false
         meshMulticast.stop()
         mdm.stop()
     }
@@ -302,6 +306,8 @@ class TrackingHost private constructor(private val appContext: Context) {
 
     fun setPaused(value: Boolean) {
         _paused.value = value
+        syncGpsSampling()
+        if (!value) reporting.requestAsap()
     }
 
     fun exportStatusJson(): String = StatusExporter.export(
@@ -450,9 +456,34 @@ class TrackingHost private constructor(private val appContext: Context) {
         val cfg = _config.value
         mesh.applySettings(cfg.meshSa)
         meshMulticast.apply(cfg.meshSa, cfg.deviceUid)
-        gps.applySettings(cfg.gps)
+        syncGpsSampling(forceRestart = true)
         tak.start(cfg)
         publishServerStatuses()
+    }
+
+    /**
+     * GNSS is the main battery cost. Stop the fused provider while paused or while
+     * ATAK owns presence — CoT is already suppressed in those states.
+     */
+    private fun syncGpsSampling(forceRestart: Boolean = false) {
+        val want = shouldSampleGps()
+        when {
+            want && (!gpsSampling || forceRestart) -> {
+                gps.start(_config.value.gps)
+                if (!gpsSampling) reporting.requestAsap()
+                gpsSampling = true
+            }
+            !want && gpsSampling -> {
+                gps.stop()
+                gpsSampling = false
+            }
+        }
+    }
+
+    private fun shouldSampleGps(): Boolean {
+        if (_paused.value || mdm.isRemotePauseRequested()) return false
+        if (atak.shouldDefer(_config.value.atak.deferToAtak)) return false
+        return true
     }
 
     private fun publishServerStatuses() {
@@ -497,6 +528,11 @@ class TrackingHost private constructor(private val appContext: Context) {
         val bm = appContext.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager ?: return null
         val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         return if (pct in 0..100) pct else null
+    }
+
+    private fun isCharging(): Boolean {
+        val bm = appContext.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager ?: return false
+        return bm.isCharging
     }
 
     private fun hash(password: String): String {

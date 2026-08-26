@@ -5,7 +5,7 @@ Shared feature IDs keep the sibling repos aligned. Status values: **Yes**, **Par
 | Feature ID | Description | WinTAKTracker | AndroidTAKTracker |
 |---|---|---|---|
 | FP-TAK-TLS | TAK Server TLS/mTLS CoT stream + fail2ban guard | Yes | Yes |
-| FP-REPORTING-ASAP | Dynamic/Constant reporting + ASAP on motion/identity | Yes | Yes |
+| FP-REPORTING-ASAP | Dynamic/Constant reporting + ASAP on motion/identity; motion-adaptive intervals | Yes | Yes |
 | FP-GPS-FUSED | Platform fused / Windows Location provider | Yes | Yes |
 | FP-GPS-IP-FALLBACK | IP geolocation (ipwho.is) delayed fallback | Yes | Yes |
 | FP-MESH-SA | UDP Mesh SA multicast 239.2.3.1:6969 | Yes | Yes |

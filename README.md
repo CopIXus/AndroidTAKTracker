@@ -43,3 +43,7 @@ Continuous releases publish `build-0.1.<run>` tags with a **signed** `AndroidTAK
 ## Feature parity
 
 See [`docs/feature-parity.md`](docs/feature-parity.md). A scheduled workflow diffs this table against WinTAKTracker and opens a parity-drift issue when IDs diverge.
+
+## Next-step prompt brief
+
+[`docs/chatgpt-pass-along.md`](docs/chatgpt-pass-along.md) is a self-contained handoff for ChatGPT (or another assistant) to draft future Cursor/agent prompts. It captures product rules, architecture, shipping features, open PRs, and known gaps — without operational TAK secrets.

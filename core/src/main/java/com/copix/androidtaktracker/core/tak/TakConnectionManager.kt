@@ -23,6 +23,8 @@ data class ServerConnectionStatus(
     val state: TakConnectionState,
     val lastErrorCode: String? = null,
     val lastSendUtc: Instant? = null,
+    /** Circuit breaker tripped: auto-reconnect stopped to stay under fail2ban thresholds. */
+    val autoReconnectSuspended: Boolean = false,
 )
 
 interface TakConnectionListener {
@@ -66,7 +68,10 @@ class TakConnectionManager(
     fun statuses(): List<ServerConnectionStatus> = config.servers.map { p ->
         val c = clients[p.id]
         if (c != null) {
-            ServerConnectionStatus(p.id, p.displayName, p.enabled, p.protocol, c.state, c.lastErrorCode, c.lastSendUtc)
+            ServerConnectionStatus(
+                p.id, p.displayName, p.enabled, p.protocol, c.state, c.lastErrorCode, c.lastSendUtc,
+                autoReconnectSuspended = c.autoReconnectSuspended,
+            )
         } else {
             ServerConnectionStatus(p.id, p.displayName, p.enabled, p.protocol, TakConnectionState.DISCONNECTED)
         }

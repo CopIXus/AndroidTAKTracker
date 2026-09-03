@@ -262,7 +262,7 @@ private fun AppShell(
                         .weight(1f)
                         .padding(16.dp),
                 ) {
-                    SectionContent(section, host, onOpenQr)
+                    SectionContent(section, host, onOpenQr, onNavigate = { section = it })
                 }
             }
         }
@@ -287,7 +287,7 @@ private fun AppShell(
                 snackbarHost = { SnackbarHost(snackbar) },
             ) { pad ->
                 androidx.compose.foundation.layout.Box(Modifier.padding(pad).padding(16.dp).fillMaxSize()) {
-                    SectionContent(section, host, onOpenQr)
+                    SectionContent(section, host, onOpenQr, onNavigate = { section = it })
                 }
             }
         }

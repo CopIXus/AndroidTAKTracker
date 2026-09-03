@@ -8,8 +8,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,7 +49,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.copix.androidtaktracker.BuildConfig
-import com.copix.androidtaktracker.core.identity.IdentityResolver
 import com.copix.androidtaktracker.core.reporting.GpsDuty
 import com.copix.androidtaktracker.core.tak.TakConnectionState
 import com.copix.androidtaktracker.host.TrackingHost
@@ -59,9 +56,6 @@ import com.copix.androidtaktracker.ui.SettingsSection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 private val Teams = listOf(
     "Cyan", "Blue", "Dark Blue", "Brown", "Green", "Dark Green",
@@ -72,9 +66,14 @@ private val Roles = listOf(
 )
 
 @Composable
-fun SectionContent(section: SettingsSection, host: TrackingHost, onOpenQr: () -> Unit) {
+fun SectionContent(
+    section: SettingsSection,
+    host: TrackingHost,
+    onOpenQr: () -> Unit,
+    onNavigate: (SettingsSection) -> Unit = {},
+) {
     when (section) {
-        SettingsSection.Status -> StatusScreen(host)
+        SettingsSection.Status -> StatusScreen(host, onNavigate)
         SettingsSection.Servers -> ServersScreen(host, onOpenQr)
         SettingsSection.Identity -> IdentityScreen(host)
         SettingsSection.Gps -> GpsScreen(host)
@@ -85,51 +84,6 @@ fun SectionContent(section: SettingsSection, host: TrackingHost, onOpenQr: () ->
         SettingsSection.Diagnostics -> DiagnosticsScreen(host)
         SettingsSection.Updates -> UpdatesScreen(host)
         SettingsSection.About -> AboutScreen()
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun StatusScreen(host: TrackingHost) {
-    val config by host.config.collectAsState()
-    val fix by host.gps.fix.collectAsState()
-    val gpsDuty by host.gps.duty.collectAsState()
-    val paused by host.paused.collectAsState()
-    val statuses by host.serverStatuses.collectAsState()
-    val identity = IdentityResolver.resolve(config)
-    val defer = host.atak.shouldDefer(config.atak.deferToAtak)
-    val connected = statuses.values.count { it.state == TakConnectionState.CONNECTED }
-    val firstError = statuses.values.firstOrNull {
-        !it.lastErrorCode.isNullOrBlank() &&
-            (it.state == TakConnectionState.ERROR || it.state == TakConnectionState.DISCONNECTED)
-    }?.lastErrorCode
-
-    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Blurb("Tracking-only TAK PLI client. Map clients show your position from CoT.")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Mode", if (paused) "Paused" else if (defer) "Defer ATAK" else "Tracking")
-            Chip("Callsign", identity.callsign)
-            Chip("GPS", fix?.source?.name ?: "No fix")
-            Chip("GPS duty", gpsDutyLabel(gpsDuty, config.gps.adaptToMotion))
-            Chip("Servers", "$connected connected")
-            Chip("Last PLI", formatTime(host.lastPliEpochMs))
-        }
-        firstError?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { host.setPaused(!paused) }) {
-                Text(if (paused) "Resume tracking" else "Pause tracking")
-            }
-        }
-        if (fix != null) {
-            Text("Position: ${"%.5f".format(fix!!.latitude)}, ${"%.5f".format(fix!!.longitude)}")
-            Text(
-                "Accuracy: ${fix!!.accuracyMeters?.let { "%.0f m".format(it) } ?: "—"} · " +
-                    "Speed: ${fix!!.speedMetersPerSecond?.let { "%.1f m/s".format(it) } ?: "—"}",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
     }
 }
 
@@ -598,6 +552,19 @@ private fun DiagnosticsScreen(host: TrackingHost) {
         }
         Blurb("Device UID: ${config.deviceUid}")
         Blurb("ATAK installed: ${host.atak.installed.value} · running: ${host.atak.running.value}")
+        val fix by host.gps.fix.collectAsState()
+        val snapshot by host.reportingSnapshot.collectAsState()
+        Blurb(
+            fix?.let { f ->
+                "Position: ${"%.5f".format(f.latitude)}, ${"%.5f".format(f.longitude)} · " +
+                    "±${f.accuracyMeters?.let { "%.0f m".format(it) } ?: "—"} · " +
+                    "${f.speedMetersPerSecond?.let { "%.1f m/s".format(it) } ?: "—"} · ${f.source}"
+            } ?: "Position: none",
+        )
+        Blurb(
+            "Reporting: ${snapshot.motion} · interval ${snapshot.intervalSeconds}s · stale ${snapshot.staleSeconds}s · " +
+                "GPS duty ${snapshot.gpsDuty} · ${snapshot.suppressed}",
+        )
 
         Text("Recent logs", fontWeight = FontWeight.SemiBold)
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -820,9 +787,4 @@ private fun EnumDropdown(
             }
         }
     }
-}
-
-private fun formatTime(epochMs: Long): String {
-    if (epochMs <= 0) return "never"
-    return SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(epochMs))
 }

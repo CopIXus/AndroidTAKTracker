@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.util.Consumer
 import com.copix.androidtaktracker.core.identity.IdentityResolver
 import com.copix.androidtaktracker.host.TrackingHost
+import com.copix.androidtaktracker.onboarding.OnboardingPolicy
 import com.copix.androidtaktracker.onboarding.OnboardingScreen
 import com.copix.androidtaktracker.service.TrackingForegroundService
 import com.copix.androidtaktracker.ui.QrScanScreen
@@ -66,14 +67,34 @@ class MainActivity : ComponentActivity() {
         setContent {
             AndroidTakTrackerTheme {
                 val host = remember { TrackingHost.get(this) }
+                val mdmPresent by host.mdm.mdmPresent.collectAsState()
+                val managedKeys by host.mdm.managedKeys.collectAsState()
                 var showOnboarding by remember {
-                    mutableStateOf(!prefs.getBoolean("onboarding_done", false))
+                    mutableStateOf(
+                        !OnboardingPolicy.shouldSkipWizard(
+                            onboardingDone = prefs.getBoolean("onboarding_done", false),
+                            mdmPresent = host.mdm.mdmPresent.value,
+                            trackingReady = OnboardingPolicy.trackingPermissionsGranted(this),
+                        ),
+                    )
                 }
                 var showQr by remember { mutableStateOf(false) }
                 var callsignDone by remember { mutableStateOf(false) }
                 var statusMessage by remember { mutableStateOf<String?>(null) }
                 val snackbar = remember { SnackbarHostState() }
                 val scope = rememberCoroutineScope()
+
+                androidx.compose.runtime.LaunchedEffect(mdmPresent) {
+                    if (OnboardingPolicy.shouldSkipWizard(
+                            onboardingDone = prefs.getBoolean("onboarding_done", false),
+                            mdmPresent = mdmPresent,
+                            trackingReady = OnboardingPolicy.trackingPermissionsGranted(this@MainActivity),
+                        )
+                    ) {
+                        prefs.edit().putBoolean("onboarding_done", true).apply()
+                        showOnboarding = false
+                    }
+                }
 
                 androidx.compose.runtime.DisposableEffect(Unit) {
                     val listener = Consumer<Intent> { intent ->
@@ -96,7 +117,13 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val config by host.config.collectAsState()
-                val needsCallsign = !callsignDone && IdentityResolver.userNeedsSetup(config)
+                val mdmOwnsIdentity = mdmPresent || "callsign" in managedKeys ||
+                    "team" in managedKeys || "role" in managedKeys
+                val needsCallsign = !callsignDone &&
+                    !OnboardingPolicy.shouldSkipCallsignSetup(
+                        userNeedsSetup = IdentityResolver.userNeedsSetup(config),
+                        mdmOwnsIdentity = mdmOwnsIdentity,
+                    )
 
                 when {
                     showOnboarding -> OnboardingScreen {

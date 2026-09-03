@@ -6,7 +6,7 @@ Tracking-only TAK PLI client for Android, by **CopIX LLC**. Sibling of [WinTAKTr
 
 - Reports ATAK-shaped self-SA (PLI) to TAK Server over TLS/mTLS or cleartext TCP
 - Enrollment via QR / Portal deep links (`tak://`, `opentaktracker://`), Marti CSR, SoftCert ZIP
-- Headwind MDM + Android Enterprise managed configuration (precedence: MDM > Portal > local/QR)
+- Headwind MDM Application Settings (binds the agent) + Android Enterprise managed configuration (precedence: MDM > Portal > local/QR). Operator recipe: [`docs/headwind-mdm.md`](docs/headwind-mdm.md).
 - Boot-start foreground service, Mesh SA multicast, Portal callsign push (`.att` suffix)
 - Optional **Defer to ATAK** so phone + ATAK do not double-publish PLI
 - In-app GitHub Releases updater with CHANGELOG notes (disabled by default when MDM is present)

@@ -8,7 +8,12 @@
     <string name="restriction_server_host_title">Server host</string>
     <string name="restriction_server_port_title">Server port</string>
     <string name="restriction_server_protocol_title">Protocol</string>
+    <string name="restriction_username_title">Username</string>
+    <string name="restriction_password_title">Password</string>
+    <string name="restriction_token_title">Enrollment token</string>
+    <string name="restriction_enroll_port_title">Enrollment port</string>
     <string name="restriction_callsign_title">Callsign</string>
+    <string name="restriction_callsign_desc">Operator callsign, or mdmDeviceId to use the Headwind device ID</string>
     <string name="restriction_team_title">Team</string>
     <string name="restriction_role_title">Role</string>
     <string name="restriction_reporting_strategy_title">Reporting strategy</string>

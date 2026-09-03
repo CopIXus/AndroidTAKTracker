@@ -27,9 +27,14 @@
     <queries>
         <package android:name="com.atakmap.app.civ" />
         <package android:name="com.atakmap.app" />
+        <package android:name="com.hmdm.launcher" />
+        <package android:name="ru.headwind.kiosk" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="com.hmdm.action.Connect" />
         </intent>
     </queries>
 

@@ -1,0 +1,16 @@
+# Headwind MDM → Application settings for com.copix.androidtaktracker
+# FAKE values only. Never commit real TAK hosts, users, or passwords.
+#
+# Attribute          Value
+# ---------          -----
+# serverHost         tak.example.com
+# serverPort         8089
+# serverProtocol     ssl
+# enrollPort         8446
+# username           USER
+# password           TOKEN
+# callsign           %NUMBER%
+# team               Cyan
+# role               Team Member
+#
+# See docs/headwind-mdm.md

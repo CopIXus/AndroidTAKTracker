@@ -2,6 +2,8 @@
 
 AndroidTAKTracker applies **callsign**, **team**, and **role** from TAK Portal the same way ATAK does — without installing full mission content.
 
+Headwind MDM / Android Enterprise managed keys take precedence over Portal. Operator setup: [`docs/headwind-mdm.md`](headwind-mdm.md).
+
 ## Receive paths
 
 1. **Device profile on connect** — `GET /Marti/api/device/profile/connection?clientUid=…` (8443/8446, mTLS).

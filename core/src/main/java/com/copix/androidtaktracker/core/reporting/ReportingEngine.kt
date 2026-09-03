@@ -13,10 +13,34 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.Instant
+
+/** Why the engine is not sending right now, for the operator Status screen. */
+enum class SuppressReason { NONE, PAUSED, ATAK_DEFER, NO_PATH }
+
+/** Runtime reporting decisions, published every engine tick so the UI never reconstructs them. */
+data class ReportingSnapshot(
+    val motion: MotionState = MotionState.UNKNOWN,
+    val strategy: String = "Dynamic",
+    val intervalSeconds: Long = 0L,
+    val staleSeconds: Long = 0L,
+    /** True when a low battery stretched the Dynamic interval. */
+    val batteryStretched: Boolean = false,
+    val lastPliEpochMs: Long = 0L,
+    /** Epoch when the next scheduled report is due (0 = unknown / not scheduled). */
+    val nextDueEpochMs: Long = 0L,
+    val gpsDuty: GpsDuty = GpsDuty.HIGH,
+    val suppressed: SuppressReason = SuppressReason.NONE,
+    /** True when at least one TAK server is connected (reliable path). */
+    val takConnected: Boolean = false,
+    /** True when Mesh SA is the active path for this tick. */
+    val meshActive: Boolean = false,
+)
 
 class ReportingEngine(
     private val log: RedactedLogger,
@@ -31,6 +55,7 @@ class ReportingEngine(
     private val deviceModel: () -> String,
     private val osVersion: () -> String,
     private val appVersion: () -> String,
+    private val motion: MotionClassifier = MotionClassifier(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var loopJob: Job? = null
@@ -40,10 +65,11 @@ class ReportingEngine(
     @Volatile var lastPliEpochMs: Long = 0L
         private set
 
+    private val _snapshot = MutableStateFlow(ReportingSnapshot())
+    val snapshot: StateFlow<ReportingSnapshot> = _snapshot
+
     private var lastSpeedMph = 0.0
     private var lastAlt = 0.0
-    private var lastSentLat = Double.NaN
-    private var lastSentLon = Double.NaN
 
     fun start() {
         if (loopJob?.isActive == true) return
@@ -75,43 +101,64 @@ class ReportingEngine(
         asap = true
     }
 
-    private suspend fun tick() {
-        if (paused()) return
-        if (deferringToAtak()) return
+    /** Forget the stationary anchor (GPS restarted after pause / ATAK defer / settings change). */
+    fun resetMotion() {
+        motion.reset()
+    }
 
+    private suspend fun tick() {
         val config = configProvider()
         val fix = fixProvider()
+        val now = System.currentTimeMillis()
+
+        // Classify every tick — even while paused — so GPS duty and the Status screen track
+        // reality; a stationary → moving transition is the one displacement-driven ASAP.
+        val decision = motion.observe(fix, config.reporting.significantMoveMeters)
+        if (decision.transitionedToMoving) asap = true
+
+        val suppressed = when {
+            paused() -> SuppressReason.PAUSED
+            deferringToAtak() -> SuppressReason.ATAK_DEFER
+            else -> SuppressReason.NONE
+        }
         val connected = tak.anyConnected
         val meshWanted = shouldSendMesh(config, connected)
-
-        if (!connected && !meshWanted) {
-            if (!asap && !identityDirty) return
-        }
+        val noPath = !connected && !meshWanted
 
         val rate = ReportingRateFactory.create(config.reporting)
         val path = if (connected) ReportingPath.RELIABLE else ReportingPath.UNRELIABLE
         val speedMph = fix?.speedMph ?: 0.0
-        val moved = metersSinceLastPli(fix)
-        val significant = config.reporting.significantMoveMeters
-        if (moved != null && moved >= significant && lastPliEpochMs > 0L &&
-            System.currentTimeMillis() - lastPliEpochMs >= 4_000L
-        ) {
-            // First real relocation after lingering — refresh the map icon promptly.
-            asap = true
-        }
-        val interval = rate.getInterval(path, speedMph, moved)
-        var intervalSec = interval.seconds.coerceAtLeast(MotionPolicy.MIN_INTERVAL_SECONDS)
-        if (!config.reporting.strategy.equals("Constant", ignoreCase = true)) {
-            intervalSec = MotionPolicy.applyBatteryMultiplier(
-                intervalSec,
-                batteryPercent(),
-                charging(),
-            )
-        }
+        val interval = rate.getInterval(path, speedMph, decision.metersFromAnchor)
+        val baseSec = interval.seconds.coerceAtLeast(MotionPolicy.MIN_INTERVAL_SECONDS)
+        val isConstant = config.reporting.strategy.equals("Constant", ignoreCase = true)
+        val intervalSec = if (isConstant) baseSec
+        else MotionPolicy.applyBatteryMultiplier(baseSec, batteryPercent(), charging())
+        val stale = rate.getStale(Duration.ofSeconds(intervalSec))
+
+        _snapshot.value = ReportingSnapshot(
+            motion = decision.state,
+            strategy = if (isConstant) "Constant" else "Dynamic",
+            intervalSeconds = intervalSec,
+            staleSeconds = stale.seconds,
+            batteryStretched = intervalSec > baseSec,
+            lastPliEpochMs = lastPliEpochMs,
+            nextDueEpochMs = when {
+                suppressed != SuppressReason.NONE || noPath -> 0L
+                lastPliEpochMs == 0L || asap || identityDirty -> now
+                else -> lastPliEpochMs + intervalSec * 1000L
+            },
+            gpsDuty = decision.gpsDuty,
+            suppressed = if (suppressed == SuppressReason.NONE && noPath) SuppressReason.NO_PATH else suppressed,
+            takConnected = connected,
+            meshActive = meshWanted,
+        )
+
+        if (suppressed != SuppressReason.NONE) return
+        if (noPath && !asap && !identityDirty) return
+
         val due = asap || identityDirty ||
             lastPliEpochMs == 0L ||
-            System.currentTimeMillis() - lastPliEpochMs >= intervalSec * 1000L
-
+            now - lastPliEpochMs >= intervalSec * 1000L
         if (!due) return
 
         val useFix = fix ?: GpsFix(
@@ -123,7 +170,6 @@ class ReportingEngine(
         )
         val active = IdentityResolver.resolve(config, deviceModel())
         val battery = batteryPercent()
-        val stale = rate.getStale(Duration.ofSeconds(intervalSec))
         val model = deviceModel()
         val os = osVersion()
 
@@ -150,17 +196,14 @@ class ReportingEngine(
             identityDirty = false
             lastSpeedMph = useFix.speedMph
             lastAlt = useFix.altitudeMeters ?: 0.0
-            lastSentLat = useFix.latitude
-            lastSentLon = useFix.longitude
+            _snapshot.value = _snapshot.value.copy(
+                lastPliEpochMs = lastPliEpochMs,
+                nextDueEpochMs = lastPliEpochMs + intervalSec * 1000L,
+            )
         }
 
         val alt = fix?.altitudeMeters
         if (rate.shouldReportAsap(lastAlt, alt, lastSpeedMph, speedMph)) asap = true
-    }
-
-    private fun metersSinceLastPli(fix: GpsFix?): Double? {
-        if (fix == null || lastSentLat.isNaN() || lastSentLon.isNaN()) return null
-        return MotionPolicy.haversineMeters(lastSentLat, lastSentLon, fix.latitude, fix.longitude)
     }
 
     private fun shouldSendMesh(config: AppConfig, connected: Boolean): Boolean {

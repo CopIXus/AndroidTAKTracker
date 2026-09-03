@@ -18,16 +18,27 @@ class LocationSpecTest {
     }
 
     @Test
-    fun `balanced and low duties step down power and add a distance floor`() {
+    fun `balanced and low duties step down power and slow the cadence without distance filters`() {
         val settings = GpsSettings()
         val balanced = FusedGpsRepository.LocationSpec.from(settings, GpsDuty.BALANCED)
         val low = FusedGpsRepository.LocationSpec.from(settings, GpsDuty.LOW)
         assertEquals(Priority.PRIORITY_BALANCED_POWER_ACCURACY, balanced.priority)
         assertEquals(Priority.PRIORITY_BALANCED_POWER_ACCURACY, low.priority)
-        assertEquals(8f, balanced.minDistanceMeters, 0f)
-        assertEquals(15f, low.minDistanceMeters, 0f)
+        // The motion classifier needs periodic samples to notice settling / movement, and the
+        // fix must not age into "held" while parked — so no distance filter is imposed.
+        assertEquals(settings.minDistanceMeters, balanced.minDistanceMeters, 0f)
+        assertEquals(settings.minDistanceMeters, low.minDistanceMeters, 0f)
         assertTrue(low.intervalMs > balanced.intervalMs)
         assertTrue(balanced.intervalMs > specHighInterval())
+        // LOW must still refresh inside the default 30 s last-fix hold window.
+        assertTrue(low.intervalMs < GpsSettings().lastFixHoldSeconds * 1000L)
+    }
+
+    @Test
+    fun `request keys differ per duty so a duty change re-requests updates`() {
+        val settings = GpsSettings()
+        val keys = GpsDuty.entries.map { FusedGpsRepository.LocationSpec.from(settings, it).key }.toSet()
+        assertEquals(3, keys.size)
     }
 
     @Test

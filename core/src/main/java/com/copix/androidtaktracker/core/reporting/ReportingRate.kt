@@ -73,8 +73,8 @@ class ConstantReportingRate(private val settings: ReportingSettings) : Reporting
         currentSpeedMph: Double,
     ): Boolean = false
 
-    override fun getStale(interval: Duration): Duration =
-        Duration.ofSeconds(MotionPolicy.staleDurationSeconds(interval.seconds.coerceAtLeast(0)))
+    // Constant strategy is deliberately untouched by the motion-adaptive work: 2×interval + 15 s.
+    override fun getStale(interval: Duration): Duration = interval.multipliedBy(2).plusSeconds(15)
 }
 
 object ReportingRateFactory {

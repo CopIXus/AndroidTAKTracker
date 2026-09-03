@@ -66,9 +66,23 @@ class MotionPolicyTest {
         assertEquals(1.0, MotionPolicy.batteryIntervalMultiplier(50, charging = false), 0.0)
         assertEquals(1.5, MotionPolicy.batteryIntervalMultiplier(20, charging = false), 0.0)
         assertEquals(2.0, MotionPolicy.batteryIntervalMultiplier(10, charging = false), 0.0)
-        assertEquals(360L, MotionPolicy.applyBatteryMultiplier(180, 10, charging = false))
+        assertEquals(270L, MotionPolicy.applyBatteryMultiplier(180, 20, charging = false))
         assertEquals(5L, MotionPolicy.applyBatteryMultiplier(5, 10, charging = false))
         assertEquals(20L, MotionPolicy.applyBatteryMultiplier(10, 10, charging = false))
+    }
+
+    @Test
+    fun `low battery never opens a gap longer than five minutes`() {
+        // 2× on the 180 s keepalive would be 360 s — capped at 300 s.
+        assertEquals(300L, MotionPolicy.applyBatteryMultiplier(180, 10, charging = false))
+        assertEquals(MotionPolicy.MAX_LOW_BATTERY_INTERVAL_SECONDS, MotionPolicy.applyBatteryMultiplier(250, 5, charging = false))
+        // An operator-configured interval above the cap is left alone, not shrunk.
+        assertEquals(400L, MotionPolicy.applyBatteryMultiplier(400, 10, charging = false))
+        // Charging or healthy battery: untouched.
+        assertEquals(180L, MotionPolicy.applyBatteryMultiplier(180, 10, charging = true))
+        assertEquals(180L, MotionPolicy.applyBatteryMultiplier(180, 80, charging = false))
+        // Stale still clears the stretched interval.
+        assertTrue(MotionPolicy.staleDurationSeconds(300) > 300)
     }
 
     @Test

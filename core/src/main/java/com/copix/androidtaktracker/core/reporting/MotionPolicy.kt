@@ -30,14 +30,26 @@ object MotionPolicy {
     const val DEFAULT_SIGNIFICANT_MOVE_METERS = 20.0
     const val MIN_STALE_SECONDS = 90L
     const val GPS_DOWNGRADE_HOLD_MS = 45_000L
+    /** Not relocating for this long marks the operator stationary (anchors GPS/CoT). */
+    const val STATIONARY_HOLD_MS = 30_000L
+    /** Longer settle after driving so a stoplight does not drop GNSS to balanced power. */
+    const val DRIVING_STOP_HOLD_MS = 60_000L
     const val LOW_BATTERY_PERCENT = 20
     const val CRITICAL_BATTERY_PERCENT = 15
     const val MIN_INTERVAL_SECONDS = 5L
+    /**
+     * Low battery may stretch a Dynamic interval, but never past this: a 5-minute gap is the
+     * most a map operator should have to wait for a stationary keepalive.
+     */
+    const val MAX_LOW_BATTERY_INTERVAL_SECONDS = 300L
 
     fun sanitizeSpeedMph(speedMph: Double): Double {
         if (speedMph.isNaN() || speedMph.isInfinite() || speedMph < 0.0) return 0.0
         return speedMph
     }
+
+    fun effectiveSignificantMove(meters: Double): Double =
+        if (meters.isNaN() || meters <= 0.0) DEFAULT_SIGNIFICANT_MOVE_METERS else meters
 
     fun gpsDuty(speedMph: Double): GpsDuty {
         val speed = sanitizeSpeedMph(speedMph)
@@ -76,7 +88,7 @@ object MotionPolicy {
     ): Boolean {
         val speed = sanitizeSpeedMph(speedMph)
         if (speed >= WALKING_SPEED_MPH) return false
-        val threshold = significantMoveMeters.let { if (it.isNaN() || it <= 0.0) DEFAULT_SIGNIFICANT_MOVE_METERS else it }
+        val threshold = effectiveSignificantMove(significantMoveMeters)
         val moved = metersSinceLastPli
         return if (moved == null) speed < STATIONARY_SPEED_MPH
         else moved < threshold
@@ -105,8 +117,10 @@ object MotionPolicy {
     fun applyBatteryMultiplier(intervalSeconds: Long, batteryPercent: Int?, charging: Boolean): Long {
         // Driving already uses the 5s floor — do not stretch that; only slow keepalives.
         if (intervalSeconds <= MIN_INTERVAL_SECONDS) return MIN_INTERVAL_SECONDS
-        val scaled = intervalSeconds * batteryIntervalMultiplier(batteryPercent, charging)
-        return maxOf(MIN_INTERVAL_SECONDS, scaled.toLong())
+        val scaled = (intervalSeconds * batteryIntervalMultiplier(batteryPercent, charging)).toLong()
+        // Never stretch past the cap; an operator-configured interval above it is left alone.
+        val cap = maxOf(intervalSeconds, MAX_LOW_BATTERY_INTERVAL_SECONDS)
+        return scaled.coerceIn(MIN_INTERVAL_SECONDS, cap)
     }
 
     fun staleDurationSeconds(intervalSeconds: Long): Long {

@@ -8,7 +8,6 @@ import com.copix.androidtaktracker.core.cot.GpsFix
 import com.copix.androidtaktracker.core.cot.GpsSourceKind
 import com.copix.androidtaktracker.core.gps.NetworkIpGeolocation
 import com.copix.androidtaktracker.core.reporting.GpsDuty
-import com.copix.androidtaktracker.core.reporting.MotionPolicy
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
@@ -37,14 +36,18 @@ class FusedGpsRepository(context: Context) {
     val fix: StateFlow<GpsFix?> = _fix
 
     private val _duty = MutableStateFlow(GpsDuty.HIGH)
+    /** Power profile currently requested from the fused provider (driven by the reporting engine). */
     val duty: StateFlow<GpsDuty> = _duty
+
+    private val _permissionMissing = MutableStateFlow(false)
+    /** True when the last location request was rejected for lack of a location permission. */
+    val permissionMissing: StateFlow<Boolean> = _permissionMissing
 
     private var settings = GpsSettings()
     private var holdJob: Job? = null
     private var armJob: Job? = null
     private var callback: LocationCallback? = null
     private var lastRequestKey: String? = null
-    private var lastHighSpeedMs = 0L
     private val networkIp = NetworkIpGeolocation(scope).also { geo ->
         geo.onFixReceived = { ipFix ->
             val cur = _fix.value
@@ -54,11 +57,13 @@ class FusedGpsRepository(context: Context) {
         }
     }
 
+    @Synchronized
     @SuppressLint("MissingPermission")
     fun start(gps: GpsSettings) {
         settings = gps
         stop()
-        lastHighSpeedMs = System.currentTimeMillis()
+        // Always open on high accuracy so the first fix after (re)start is a real one; the
+        // reporting engine steps the duty down once it knows we are still.
         _duty.value = GpsDuty.HIGH
         lastRequestKey = null
         if (gps.sourcePriority.equals("NetworkOnly", true)) {
@@ -79,9 +84,9 @@ class FusedGpsRepository(context: Context) {
                     source = GpsSourceKind.FUSED,
                 )
                 _fix.value = next
+                _permissionMissing.value = false
                 networkIp.stop()
                 scheduleHold()
-                adaptDuty(next.speedMph)
             }
         }
         callback = cb
@@ -92,6 +97,7 @@ class FusedGpsRepository(context: Context) {
         }
     }
 
+    @Synchronized
     fun stop() {
         callback?.let { client.removeLocationUpdates(it) }
         callback = null
@@ -118,27 +124,26 @@ class FusedGpsRepository(context: Context) {
             .build()
         try {
             client.requestLocationUpdates(request, cb, Looper.getMainLooper())
+            _permissionMissing.value = false
         } catch (_: SecurityException) {
             callback = null
             lastRequestKey = null
+            _permissionMissing.value = true
             armNetwork(immediate = true)
         }
     }
 
-    private fun adaptDuty(speedMph: Double) {
-        if (!settings.adaptToMotion) {
-            if (_duty.value != GpsDuty.HIGH) {
-                _duty.value = GpsDuty.HIGH
-                requestUpdates(GpsDuty.HIGH)
-            }
-            return
-        }
-        val now = System.currentTimeMillis()
-        if (MotionPolicy.gpsDuty(speedMph) == GpsDuty.HIGH) lastHighSpeedMs = now
-        val next = MotionPolicy.nextGpsDuty(_duty.value, speedMph, now - lastHighSpeedMs)
-        if (next == _duty.value && lastRequestKey != null) return
-        _duty.value = next
-        requestUpdates(next)
+    /**
+     * Apply the power profile chosen by the reporting engine's motion classifier. A no-op
+     * unless the resulting request differs; ignored while GNSS is stopped or when the
+     * operator turned off [GpsSettings.adaptToMotion].
+     */
+    @Synchronized
+    fun setDuty(duty: GpsDuty) {
+        val effective = if (settings.adaptToMotion) duty else GpsDuty.HIGH
+        if (_duty.value == effective && lastRequestKey != null) return
+        _duty.value = effective
+        requestUpdates(effective)
     }
 
     private fun scheduleHold() {
@@ -175,6 +180,11 @@ class FusedGpsRepository(context: Context) {
         val key: String get() = "$priority:$intervalMs:$minIntervalMs:$minDistanceMeters"
 
         companion object {
+            /**
+             * No extra distance filters: the motion classifier needs periodic samples to
+             * notice that we settled or started moving again, and a suppressed callback
+             * would otherwise let the fix age into "held" while parked.
+             */
             fun from(gps: GpsSettings, duty: GpsDuty): LocationSpec {
                 val effective = if (gps.adaptToMotion) duty else GpsDuty.HIGH
                 return when (effective) {
@@ -188,13 +198,13 @@ class FusedGpsRepository(context: Context) {
                         priority = Priority.PRIORITY_BALANCED_POWER_ACCURACY,
                         intervalMs = 8_000L,
                         minIntervalMs = 5_000L,
-                        minDistanceMeters = maxOf(gps.minDistanceMeters, 8f),
+                        minDistanceMeters = gps.minDistanceMeters,
                     )
                     GpsDuty.LOW -> LocationSpec(
                         priority = Priority.PRIORITY_BALANCED_POWER_ACCURACY,
-                        intervalMs = 20_000L,
-                        minDistanceMeters = maxOf(gps.minDistanceMeters, 15f),
+                        intervalMs = 15_000L,
                         minIntervalMs = 10_000L,
+                        minDistanceMeters = gps.minDistanceMeters,
                     )
                 }
             }

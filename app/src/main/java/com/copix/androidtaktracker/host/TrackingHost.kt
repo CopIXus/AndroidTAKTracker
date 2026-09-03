@@ -1,7 +1,9 @@
 package com.copix.androidtaktracker.host
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -9,7 +11,9 @@ import android.net.NetworkRequest
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.copix.androidtaktracker.BuildConfig
 import com.copix.androidtaktracker.atak.AtakCoexistence
@@ -26,6 +30,7 @@ import com.copix.androidtaktracker.core.mesh.MeshSaBroadcaster
 import com.copix.androidtaktracker.core.portal.DeviceProfileSync
 import com.copix.androidtaktracker.core.portal.ServerCertificateProvider
 import com.copix.androidtaktracker.core.reporting.ReportingEngine
+import com.copix.androidtaktracker.core.reporting.ReportingSnapshot
 import com.copix.androidtaktracker.core.tak.ClientCertificateMaterial
 import com.copix.androidtaktracker.core.tak.EnrollmentApplyResult
 import com.copix.androidtaktracker.core.tak.EnrollmentService
@@ -41,6 +46,7 @@ import com.copix.androidtaktracker.core.update.UpdateService
 import com.copix.androidtaktracker.core.util.LogLevel
 import com.copix.androidtaktracker.core.util.RedactedLogger
 import com.copix.androidtaktracker.gps.FusedGpsRepository
+import com.copix.androidtaktracker.gps.GpsSamplingPolicy
 import com.copix.androidtaktracker.mdm.MdmConfigBridge
 import com.copix.androidtaktracker.mesh.MeshMulticastSupport
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +58,17 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.time.Duration
 import java.time.Instant
+
+/** Platform facts for the Status screen; `null` means Android did not tell us. */
+data class DeviceState(
+    val batteryPercent: Int? = null,
+    val charging: Boolean = false,
+    val batteryOptimizationExempt: Boolean? = null,
+    val networkAvailable: Boolean = true,
+    val locationPermissionGranted: Boolean = true,
+    /** True while the fused provider is actually running (false when paused / ATAK-deferred). */
+    val gpsSampling: Boolean = false,
+)
 
 class TrackingHost private constructor(private val appContext: Context) {
     private val store = ConfigStore(
@@ -127,6 +144,13 @@ class TrackingHost private constructor(private val appContext: Context) {
     private val _paused = MutableStateFlow(false)
     val paused: StateFlow<Boolean> = _paused
 
+    /** Live reporting decisions (motion, interval, next due, GPS duty) for the Status screen. */
+    val reportingSnapshot: StateFlow<ReportingSnapshot> = reporting.snapshot
+
+    private val _deviceState = MutableStateFlow(DeviceState())
+    /** Battery / network / permission facts Android can tell us cheaply; refreshed every 5 s. */
+    val deviceState: StateFlow<DeviceState> = _deviceState
+
     private val _serverStatuses = MutableStateFlow<Map<String, ServerConnectionStatus>>(emptyMap())
     val serverStatuses: StateFlow<Map<String, ServerConnectionStatus>> = _serverStatuses
 
@@ -182,6 +206,7 @@ class TrackingHost private constructor(private val appContext: Context) {
     @Volatile private var started = false
     @Volatile private var gpsSampling = false
     private var mainLoopJob: kotlinx.coroutines.Job? = null
+    private var dutyJob: kotlinx.coroutines.Job? = null
 
     fun start() {
         // Re-entrant start (service restart without stop) must not double-register network
@@ -196,6 +221,13 @@ class TrackingHost private constructor(private val appContext: Context) {
             }
         }
         registerNetworkCallback()
+        refreshDeviceState()
+        dutyJob = scope.launch {
+            // The motion classifier decides how hard GNSS should work; apply every change.
+            reporting.snapshot.collect { snap ->
+                if (gpsSampling) gps.setDuty(snap.gpsDuty)
+            }
+        }
         mainLoopJob = scope.launch {
             reloadFromMdm()
             applyRuntime()
@@ -205,15 +237,30 @@ class TrackingHost private constructor(private val appContext: Context) {
                 atak.refreshInstalled()
                 atak.refreshRunning()
                 syncGpsSampling()
+                refreshDeviceState()
                 publishServerStatuses()
             }
         }
+    }
+
+    /** Re-read cheap platform facts (battery, exemption, permission) — e.g. when the UI resumes. */
+    fun refreshDeviceState() {
+        _deviceState.value = DeviceState(
+            batteryPercent = readBattery(),
+            charging = isCharging(),
+            batteryOptimizationExempt = isIgnoringBatteryOptimizations(),
+            networkAvailable = isNetworkAvailable(),
+            locationPermissionGranted = hasLocationPermission() && !gps.permissionMissing.value,
+            gpsSampling = gpsSampling,
+        )
     }
 
     fun stop() {
         started = false
         mainLoopJob?.cancel()
         mainLoopJob = null
+        dutyJob?.cancel()
+        dutyJob = null
         reporting.stop()
         unregisterNetworkCallback()
         scope.launch { tak.stop() }
@@ -305,6 +352,7 @@ class TrackingHost private constructor(private val appContext: Context) {
     fun setPaused(value: Boolean) {
         _paused.value = value
         syncGpsSampling()
+        refreshDeviceState()
         if (!value) reporting.requestAsap()
     }
 
@@ -470,7 +518,12 @@ class TrackingHost private constructor(private val appContext: Context) {
         when {
             want && (!gpsSampling || forceRestart) -> {
                 gps.start(_config.value.gps)
-                if (!gpsSampling) reporting.requestAsap()
+                if (!gpsSampling) {
+                    // Fresh start after pause/defer: forget the old anchor so GNSS runs on
+                    // high accuracy until we know whether the operator moved meanwhile.
+                    reporting.resetMotion()
+                    reporting.requestAsap()
+                }
                 gpsSampling = true
             }
             !want && gpsSampling -> {
@@ -480,10 +533,31 @@ class TrackingHost private constructor(private val appContext: Context) {
         }
     }
 
-    private fun shouldSampleGps(): Boolean {
-        if (_paused.value || mdm.isRemotePauseRequested()) return false
-        if (atak.shouldDefer(_config.value.atak.deferToAtak)) return false
-        return true
+    private fun shouldSampleGps(): Boolean = GpsSamplingPolicy.shouldSample(
+        paused = _paused.value,
+        remotePauseRequested = mdm.isRemotePauseRequested(),
+        deferringToAtak = atak.shouldDefer(_config.value.atak.deferToAtak),
+    )
+
+    private fun isIgnoringBatteryOptimizations(): Boolean? {
+        val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return null
+        return try {
+            pm.isIgnoringBatteryOptimizations(appContext.packageName)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isNetworkAvailable(): Boolean {
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION)
+        val coarse = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION)
+        return fine == PackageManager.PERMISSION_GRANTED || coarse == PackageManager.PERMISSION_GRANTED
     }
 
     private fun publishServerStatuses() {

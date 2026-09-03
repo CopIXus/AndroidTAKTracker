@@ -61,6 +61,41 @@ class ReportingRateTest {
     }
 
     @Test
+    fun `constant strategy keeps its original stale formula`() {
+        // Pre-existing behaviour: 2 × interval + 15 s, no 90 s floor.
+        val interval = constant.getInterval(ReportingPath.RELIABLE, 0.0, null)
+        assertEquals(35L, constant.getStale(interval).seconds)
+        val custom = ConstantReportingRate(ReportingSettings(constantIntervalSeconds = 60))
+        assertEquals(135L, custom.getStale(custom.getInterval(ReportingPath.UNRELIABLE, 0.0, null)).seconds)
+        assertTrue(constant.getStale(interval).seconds > interval.seconds)
+    }
+
+    @Test
+    fun `dynamic stale always exceeds the interval across every band`() {
+        val cases = listOf(
+            adaptive.getInterval(ReportingPath.RELIABLE, 0.0, 0.0),        // stationary
+            adaptive.getInterval(ReportingPath.RELIABLE, 3.0, null),       // walking
+            adaptive.getInterval(ReportingPath.RELIABLE, 15.0, null),      // slow vehicle
+            adaptive.getInterval(ReportingPath.RELIABLE, 65.0, null),      // highway
+            adaptive.getInterval(ReportingPath.UNRELIABLE, 0.0, 0.0),      // mesh stationary
+            java.time.Duration.ofSeconds(MotionPolicy.applyBatteryMultiplier(180, 10, false)),
+        )
+        cases.forEach { interval ->
+            val stale = adaptive.getStale(interval)
+            assertTrue("stale ${stale.seconds} <= interval ${interval.seconds}", stale.seconds > interval.seconds)
+            assertTrue(stale.seconds >= MotionPolicy.MIN_STALE_SECONDS)
+        }
+    }
+
+    @Test
+    fun `displacement below the threshold keeps a walking-speed jitter on the stationary cadence`() {
+        // Anchored, 8 m from the anchor, GPS says 3 mph — still parked.
+        assertEquals(180L, adaptive.getInterval(ReportingPath.RELIABLE, 3.0, 8.0).seconds)
+        // Not anchored (null) at 3 mph — genuinely walking.
+        assertTrue(adaptive.getInterval(ReportingPath.RELIABLE, 3.0, null).seconds in 30L..50L)
+    }
+
+    @Test
     fun `factory selects constant only when asked`() {
         val dyn = ReportingRateFactory.create(ReportingSettings(strategy = "Dynamic"))
         val con = ReportingRateFactory.create(ReportingSettings(strategy = "Constant"))

@@ -1,11 +1,20 @@
 ﻿name: Release
 
+# Two ways to publish a signed build:
+#   - push to main            -> continuous "build-0.1.<run>" release (APK + AAB)
+#   - push a tag vX.Y.Z       -> versioned release named after the tag, notes from CHANGELOG.md
+# Both use the same keystore secrets; see docs/release.md.
 on:
   push:
     branches: [main, master]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -26,6 +35,28 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Resolve version
+        id: ver
+        run: |
+          RUN="${{ github.run_number }}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            VERSION="${TAG#v}"
+            NAME="AndroidTAKTracker ${VERSION}"
+          else
+            TAG="build-0.1.${RUN}"
+            VERSION="0.1.${RUN}"
+            NAME="${TAG}"
+          fi
+          echo "tag=${TAG}"               >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"       >> "$GITHUB_OUTPUT"
+          echo "version_code=${RUN}"      >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}"             >> "$GITHUB_OUTPUT"
+          echo "Releasing ${NAME} (versionName ${VERSION}, versionCode ${RUN})"
+
+      - name: Unit tests
+        run: ./gradlew :core:testDebugUnitTest :app:testDebugUnitTest --stacktrace
+
       - name: Decode release keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -38,64 +69,101 @@ jobs:
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > ci/release.jks
           ls -la ci/release.jks
 
-      - name: Assemble signed release
+      - name: Assemble signed release APK + AAB
         env:
           ANDROID_KEYSTORE_FILE: ${{ github.workspace }}/ci/release.jks
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          ./gradlew :app:assembleRelease \
-            -PversionCode=${{ github.run_number }} \
-            -PversionName=0.1.${{ github.run_number }} \
+          ./gradlew :app:assembleRelease :app:bundleRelease \
+            -PversionCode=${{ steps.ver.outputs.version_code }} \
+            -PversionName=${{ steps.ver.outputs.version }} \
             --stacktrace
 
-      - name: Verify APK is signed
+      - name: Verify APK and AAB signatures
         run: |
-          SRC=$(ls app/build/outputs/apk/release/*.apk | head -n1)
-          echo "APK: $SRC"
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          AAB=$(ls app/build/outputs/bundle/release/*.aab | head -n1)
+          echo "APK: $APK"
+          echo "AAB: $AAB"
+          case "$APK" in *unsigned*) echo "Refusing to publish unsigned APK"; exit 1 ;; esac
+          case "$AAB" in *unsigned*) echo "Refusing to publish unsigned AAB"; exit 1 ;; esac
+
           APKSIGNER=$(ls -1 "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n1)
-          "$APKSIGNER" verify --print-certs "$SRC"
-          case "$SRC" in
-            *unsigned*) echo "Refusing to publish unsigned APK"; exit 1 ;;
-          esac
+          OUT=$("$APKSIGNER" verify --verbose --print-certs "$APK")
+          echo "$OUT"
+          echo "$OUT" | grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" || { echo "APK lacks v2 signature"; exit 1; }
+          echo "$OUT" | grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" || { echo "APK lacks v3 signature"; exit 1; }
 
+          jarsigner -verify "$AAB" | grep -q "jar verified" || { echo "AAB is not signed"; exit 1; }
 
-      - name: Package APK + SHA256
+          AAPT2=$(ls -1 "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -n1)
+          "$AAPT2" dump badging "$APK" | grep -E "^package:|targetSdkVersion"
+
+      - name: Package artifacts + SHA256
         run: |
-          TAG="build-0.1.${{ github.run_number }}"
+          set -euo pipefail
           mkdir -p dist
-          SRC=$(ls app/build/outputs/apk/release/*.apk | head -n1)
-          # Prefer the signed artifact name if present
-          if ls app/build/outputs/apk/release/*-signed.apk >/dev/null 2>&1; then
-            SRC=$(ls app/build/outputs/apk/release/*-signed.apk | head -n1)
-          fi
-          cp "$SRC" dist/AndroidTAKTracker.apk
+          cp "$(ls app/build/outputs/apk/release/*.apk | head -n1)" dist/AndroidTAKTracker.apk
+          cp "$(ls app/build/outputs/bundle/release/*.aab | head -n1)" dist/AndroidTAKTracker.aab
+          cp app/build/outputs/mapping/release/mapping.txt dist/mapping.txt || true
           (cd dist && sha256sum AndroidTAKTracker.apk | awk '{print $1 "  AndroidTAKTracker.apk"}' > AndroidTAKTracker.apk.sha256)
-          echo "Packaged $TAG"
-          cat dist/AndroidTAKTracker.apk.sha256
+          (cd dist && sha256sum AndroidTAKTracker.aab | awk '{print $1 "  AndroidTAKTracker.aab"}' > AndroidTAKTracker.aab.sha256)
+          cat dist/*.sha256
 
-      - name: Upload APK artifact
+      - name: Release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          {
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              echo "AndroidTAKTracker ${VERSION} — signed release."
+              echo
+              # Keep-a-Changelog section for this version (falls back to [Unreleased]).
+              awk -v v="$VERSION" '
+                /^## / { if (found) exit; if (index($0, "[" v "]") > 0) { found=1; next } }
+                found { print }
+              ' CHANGELOG.md > /tmp/section.md || true
+              if [ ! -s /tmp/section.md ]; then
+                awk '/^## / { if (found) exit; if (tolower($0) ~ /unreleased/) { found=1; next } } found { print }' CHANGELOG.md > /tmp/section.md || true
+              fi
+              cat /tmp/section.md
+              echo
+            else
+              echo "Continuous build of AndroidTAKTracker (signed release APK + AAB)."
+              echo
+            fi
+            echo "**Install (sideload):** download \`AndroidTAKTracker.apk\`, verify with \`AndroidTAKTracker.apk.sha256\`."
+            echo "**Play Console:** upload \`AndroidTAKTracker.aab\` (and \`mapping.txt\` for crash de-obfuscation)."
+            echo
+            echo "MDM-managed fleets should prefer MDM app updates over the in-app updater."
+            echo "If Android says \"App not installed\", uninstall any older build signed with a different key first."
+          } > dist/RELEASE_NOTES.md
+          cat dist/RELEASE_NOTES.md
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AndroidTAKTracker-release
+          name: AndroidTAKTracker-${{ steps.ver.outputs.tag }}
           path: dist/*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-0.1.${{ github.run_number }}
-          name: build-0.1.${{ github.run_number }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.name }}
+          # Not a pre-release even for continuous builds: the in-app updater reads
+          # releases/latest, which skips pre-releases.
+          prerelease: false
           files: |
             dist/AndroidTAKTracker.apk
             dist/AndroidTAKTracker.apk.sha256
+            dist/AndroidTAKTracker.aab
+            dist/AndroidTAKTracker.aab.sha256
           generate_release_notes: true
-          body: |
-            Continuous build of AndroidTAKTracker (signed release APK).
-
-            Install `AndroidTAKTracker.apk`. Verify with `AndroidTAKTracker.apk.sha256`.
-            MDM-managed fleets should prefer MDM app updates over the in-app updater.
-
-            If Android says "App not installed", uninstall any older unsigned/debug build first.
+          body_path: dist/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

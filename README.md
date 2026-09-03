@@ -32,7 +32,7 @@ gradlew.bat :core:testDebugUnitTest
 
 Requires Android SDK (create `local.properties` with `sdk.dir=…`; that file is gitignored).
 
-Continuous releases publish `build-0.1.<run>` tags with a **signed** `AndroidTAKTracker.apk` + `.sha256`.
+Continuous releases publish `build-0.1.<run>` tags with a **signed** `AndroidTAKTracker.apk` + `.sha256` and a Play-ready `AndroidTAKTracker.aab`; pushing a `vX.Y.Z` tag publishes a versioned release with CHANGELOG notes. Signing keys, Play App Signing and Play Console declarations are covered in [`docs/release.md`](docs/release.md).
 
 ### Sideload install
 

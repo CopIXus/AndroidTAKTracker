@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `ReportingSnapshot` / `DeviceState` runtime state and a pure `TrackingStatusMapper` (core) so the UI never reconstructs engine behaviour
+- Release pipeline: `vX.Y.Z` tags publish versioned releases with CHANGELOG notes alongside continuous `build-0.1.<run>` builds; every release ships a signed APK **and** a Play-ready AAB with SHA-256 files, runs unit tests first, and asserts v2 + v3 APK signatures; release builds fail loudly when signing is not configured instead of emitting an unsigned APK; R8 code/resource shrinking (names kept) trims the APK by roughly a third; `docs/release.md` covers keystore secrets, Play App Signing and Play Console declarations
 - Headwind MDM Application Settings bind (`com.hmdm.action.Connect`): `password` aliases `token`, Marti enroll via `enrollManual`, callsign from `%NUMBER%` / `mdmDeviceId` / device ID; skip first-run wizard when MDM granted tracking permissions
 - Portal Pref-*.zip preference packages (MANIFEST + certs/config.pref) via fileshare CoT / Marti sync download, matching ATAK onReceiveImport
 

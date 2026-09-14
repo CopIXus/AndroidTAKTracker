@@ -3,6 +3,7 @@ package com.copix.androidtaktracker.core.tak
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ConfigStore
 import com.copix.androidtaktracker.core.config.ServerProfile
+import com.copix.androidtaktracker.core.config.ServerStreams
 import com.copix.androidtaktracker.core.identity.RemoteIdentityApply
 import com.copix.androidtaktracker.core.util.RedactedLogger
 import java.io.ByteArrayInputStream
@@ -125,20 +126,21 @@ class SoftCertImporter(
             val certPwdBlob = "$id-certpwd"
             store.writeSecret(certPwdBlob, workingPassword)
 
-            config.servers.add(
-                ServerProfile(
-                    id = id,
-                    displayName = prefs["description"] ?: "SoftCert $host",
-                    host = host,
-                    port = port,
-                    protocol = protocol,
-                    username = prefs["username"],
-                    clientCertFileName = certFile,
-                    trustStoreFileName = trustFile,
-                    certPasswordBlobName = certPwdBlob,
-                    trustPasswordBlobName = trustPwdBlob,
-                ),
+            val existing = ServerStreams.find(config.servers, host, port, protocol)
+            val profile = existing ?: ServerProfile(
+                id = id,
+                displayName = prefs["description"] ?: "SoftCert $host",
+                host = host,
+                port = port,
+                protocol = protocol,
             )
+            if (existing == null) config.servers.add(profile)
+            else log.info("Enroll", "SoftCert updated existing $host:$port profile; not adding a second connection.")
+            profile.username = prefs["username"] ?: profile.username
+            profile.clientCertFileName = certFile
+            profile.trustStoreFileName = trustFile
+            profile.certPasswordBlobName = certPwdBlob
+            profile.trustPasswordBlobName = trustPwdBlob
 
             RemoteIdentityApply.apply(
                 config,
@@ -148,7 +150,7 @@ class SoftCertImporter(
             )
 
             log.info("Enroll", "SoftCert ZIP imported; client PKCS12 persisted for reconnect.")
-            SoftCertImportResult(true, "Imported SoftCert for $host", id)
+            SoftCertImportResult(true, "Imported SoftCert for $host", profile.id)
         } catch (ex: Exception) {
             log.warn("Enroll", "SoftCert import failed: ${ex.javaClass.simpleName}")
             SoftCertImportResult(false, "SoftCert import failed: ${ex.message}")

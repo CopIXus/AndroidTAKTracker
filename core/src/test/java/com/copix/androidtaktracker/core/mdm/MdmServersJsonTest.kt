@@ -53,6 +53,16 @@ class MdmServersJsonTest {
     }
 
     @Test
+    fun `duplicate host port protocol is kept once`() {
+        val doc = MdmServersJson.parse(
+            """[{"host":"TAK.example.com","port":8089},{"host":"tak.example.com","port":8089,"protocol":"ssl"},{"host":"tak.example.com","port":8088}]""",
+        )
+        assertEquals(2, doc.servers.size)
+        assertEquals(8089, doc.servers[0].port)
+        assertEquals(8088, doc.servers[1].port)
+    }
+
+    @Test
     fun `blank json is not authoritative`() {
         val doc = MdmServersJson.parse("  ")
         assertFalse(doc.serversAuthoritative)

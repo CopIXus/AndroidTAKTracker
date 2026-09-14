@@ -54,7 +54,7 @@ If `callsign` is omitted, `mdmDeviceId`, or a leftover `%NUMBER%`, the app uses 
 
 ## Multiple servers (`serversJson`)
 
-When `serversJson` is present and valid it is the managed server set. Flat `serverHost` is ignored. Profiles already enrolled (matching host) are updated, not deleted. Local/QR servers that are not in the JSON stay. Invalid JSON falls back to the flat `serverHost` row.
+When `serversJson` is present and valid it is the managed server set. Flat `serverHost` is ignored. Profiles already enrolled for the same host, port, and protocol are updated, not duplicated. A repeated host:port:protocol in the JSON is kept once. The connection layer also refuses a second socket to the same stream if a duplicate profile exists. Local/QR servers that are not in the JSON stay. Invalid JSON falls back to the flat `serverHost` row.
 
 A JSON array is servers only. An object can also set identity and the lock (those fields win over flat attributes when both are set). Callsign / team / role stay device-wide — one PLI identity, many TAK streams. The map label still gets `.att`.
 

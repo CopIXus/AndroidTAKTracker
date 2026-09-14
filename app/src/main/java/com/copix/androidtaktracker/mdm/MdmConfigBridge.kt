@@ -8,6 +8,7 @@ import android.content.RestrictionsManager
 import android.os.Build
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ServerProfile
+import com.copix.androidtaktracker.core.config.ServerStreams
 import com.copix.androidtaktracker.core.identity.RemoteIdentityApply
 import com.copix.androidtaktracker.core.mdm.MdmServersDocument
 import com.copix.androidtaktracker.core.mdm.MdmServersJson
@@ -337,7 +338,7 @@ class MdmConfigBridge(
         displayName: String?,
         allowInsecureTls: Boolean?,
     ): ServerApply {
-        val existing = config.servers.firstOrNull { it.host.equals(host, ignoreCase = true) }
+        val existing = ServerStreams.find(config.servers, host, port, protocol)
         val wantsTls = !protocol.equals("tcp", ignoreCase = true)
         if (wantsTls && MdmSettingsApply.shouldEnroll(existing, username, secret)) {
             val result = enrollment.enrollManual(
@@ -348,7 +349,7 @@ class MdmConfigBridge(
                 streamPort = port,
                 enrollPort = enrollPort,
             )
-            val profile = config.servers.firstOrNull { it.host.equals(host, ignoreCase = true) }
+            val profile = ServerStreams.find(config.servers, host, port, protocol)
             if (profile != null) {
                 if (!displayName.isNullOrBlank()) profile.displayName = displayName
                 if (allowInsecureTls != null) profile.allowInsecureTlsSoftAccept = allowInsecureTls

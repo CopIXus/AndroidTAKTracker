@@ -1,5 +1,6 @@
 package com.copix.androidtaktracker.core.mdm
 
+import com.copix.androidtaktracker.core.config.ServerStreams
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -58,14 +59,15 @@ object MdmServersJson {
         } catch (ex: Exception) {
             return MdmServersDocument(parseError = "serversJson is not valid JSON (${ex.javaClass.simpleName}).")
         }
-        return when (element) {
+        val parsed = when (element) {
             is JsonArray -> MdmServersDocument(
                 servers = element.mapNotNull { serverFrom(it) },
                 serversAuthoritative = true,
             )
             is JsonObject -> fromObject(element)
-            else -> MdmServersDocument(parseError = "serversJson must be an array or object.")
+            else -> return MdmServersDocument(parseError = "serversJson must be an array or object.")
         }
+        return parsed.copy(servers = distinctStreams(parsed.servers))
     }
 
     private fun fromObject(obj: JsonObject): MdmServersDocument {
@@ -119,6 +121,11 @@ object MdmServersJson {
         val prim = obj[key] as? JsonPrimitive ?: return null
         prim.booleanOrNull?.let { return it }
         return parseBool(prim.contentOrNull)
+    }
+
+    private fun distinctStreams(servers: List<MdmServerSpec>): List<MdmServerSpec> {
+        val seen = LinkedHashSet<String>()
+        return servers.filter { seen.add(ServerStreams.key(it.host, it.port, it.protocol)) }
     }
 
     fun parseBool(raw: String?): Boolean? {

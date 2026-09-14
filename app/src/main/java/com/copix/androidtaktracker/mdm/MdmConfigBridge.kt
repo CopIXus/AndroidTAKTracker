@@ -47,8 +47,16 @@ class MdmConfigBridge(
     private val _mdmPresent = MutableStateFlow(false)
     val mdmPresent: StateFlow<Boolean> = _mdmPresent
 
-    private var pauseRequested = false
-    fun isRemotePauseRequested(): Boolean = pauseRequested
+    private val _remotePause = MutableStateFlow(false)
+    val remotePause: StateFlow<Boolean> = _remotePause
+    fun isRemotePauseRequested(): Boolean = _remotePause.value
+
+    private val _allowOperatorPause = MutableStateFlow(true)
+    /**
+     * False when an MDM agent is present unless `allowTrackingPause` is explicitly true.
+     * Unmanaged devices stay true.
+     */
+    val allowOperatorPause: StateFlow<Boolean> = _allowOperatorPause
 
     private val _requestBatteryExemption = MutableStateFlow(true)
     /** False only when MDM explicitly sets `requestBatteryExemption` to false. */
@@ -86,7 +94,7 @@ class MdmConfigBridge(
             val action = intent?.action.orEmpty()
             when {
                 action.endsWith("attracker-pause") -> {
-                    pauseRequested = true
+                    _remotePause.value = true
                     log.warn("MDM", "Remote pause via push broadcast.")
                     onConfigUpdated?.invoke()
                 }
@@ -173,7 +181,7 @@ class MdmConfigBridge(
                     val payload = args?.getOrNull(1)?.toString().orEmpty()
                     when {
                         type.contains("attracker-pause", ignoreCase = true) -> {
-                            pauseRequested = true
+                            _remotePause.value = true
                             log.warn("MDM", "Remote pause requested via Headwind push.")
                             onConfigUpdated?.invoke()
                         }
@@ -213,6 +221,7 @@ class MdmConfigBridge(
         val keys = MdmSettingsApply.normalize(merged, headwind.getDeviceId())
         _managedKeys.value = keys.keys.toSet()
         if (keys.isNotEmpty()) markPresent()
+        refreshPausePolicy(keys)
         if (keys.isEmpty()) return MdmApplyResult(false)
         _requestBatteryExemption.value =
             MdmServersJson.parseBool(keys["requestBatteryExemption"]) ?: true
@@ -283,7 +292,7 @@ class MdmConfigBridge(
             }
         }
         keys["pause"]?.let {
-            pauseRequested = it.equals("true", true) || it == "1"
+            _remotePause.value = it.equals("true", true) || it == "1"
         }
 
         val tls = document.allowInsecureTlsSoftAccept
@@ -323,6 +332,15 @@ class MdmConfigBridge(
         document.allowInsecureTlsSoftAccept?.let { keys["allowInsecureTlsSoftAccept"] = it.toString() }
         document.requestBatteryExemption?.let { keys["requestBatteryExemption"] = it.toString() }
         document.preventSleepWhileTracking?.let { keys["preventSleepWhileTracking"] = it.toString() }
+        document.allowTrackingPause?.let { keys["allowTrackingPause"] = it.toString() }
+    }
+
+    private fun refreshPausePolicy(keys: Map<String, String>) {
+        _allowOperatorPause.value = if (!_mdmPresent.value) {
+            true
+        } else {
+            MdmServersJson.parseBool(keys["allowTrackingPause"]) == true
+        }
     }
 
     private data class ServerApply(val changed: Boolean, val enrollResult: EnrollmentApplyResult? = null)

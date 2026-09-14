@@ -44,6 +44,9 @@ fun StatusScreen(host: TrackingHost, onNavigate: (SettingsSection) -> Unit) {
     val reporting by host.reportingSnapshot.collectAsState()
     val device by host.deviceState.collectAsState()
     val mdmPresent by host.mdm.mdmPresent.collectAsState()
+    val allowPause by host.mdm.allowOperatorPause.collectAsState()
+    val remotePause by host.mdm.remotePause.collectAsState()
+    val unlocked by host.settingsUnlocked.collectAsState()
     val ctx = LocalContext.current
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -64,7 +67,7 @@ fun StatusScreen(host: TrackingHost, onNavigate: (SettingsSection) -> Unit) {
     val status = TrackingStatusMapper.map(
         StatusInputs(
             callsign = identity.callsign,
-            paused = paused || host.mdm.isRemotePauseRequested(),
+            paused = paused || remotePause,
             deferringToAtak = deferring,
             servers = statuses.values.toList(),
             fix = fix,
@@ -82,9 +85,19 @@ fun StatusScreen(host: TrackingHost, onNavigate: (SettingsSection) -> Unit) {
     )
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        val effectivePaused = paused || remotePause
+        val pauseEnabled = host.canOperatorPause()
+        val pauseHint = when {
+            remotePause -> "Paused by MDM"
+            mdmPresent && !allowPause -> "Pause is disabled by MDM"
+            host.isSettingsLocked && !unlocked -> "Settings are locked"
+            else -> null
+        }
         TrackingStatusCard(
             status = status,
-            paused = paused,
+            paused = effectivePaused,
+            pauseEnabled = pauseEnabled,
+            pauseHint = pauseHint,
             onTogglePause = { host.setPaused(!paused) },
         )
         TrackingIntelligenceCard(status)

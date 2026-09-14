@@ -40,9 +40,10 @@ Use obvious fakes in examples — never put a real TAK host, user, or password i
 | `role` | `Team Member` | Optional ATAK role |
 | `enrollUrl` | `opentaktracker://enroll?host=…` | Optional single-field enroll (avoid embedding secrets) |
 | `serversJson` | see below | One JSON value for multiple TAK servers, identity, and the settings lock |
-| `settingsLock` | `LOCKCODE` | Locks local edits. Re-applied on every sync. Also accepted inside `serversJson`. |
+| `settingsLock` | `LOCKCODE` | Grays out every local setting, including pause. Screens stay readable. Re-applied on every sync. Also accepted inside `serversJson`. |
 | `settingsLockClear` | `true` | Clears the lock only when `settingsLock` is empty. A non-blank lock wins if both are set. |
 | `allowInsecureTlsSoftAccept` | `true` | Lab CAs. Also a per-server flag inside `serversJson`. |
+| `allowTrackingPause` | `false` | MDM-managed devices cannot pause or resume unless this is `true`. Unlocking the settings lock does not override it. |
 | `requestBatteryExemption` | `true` | Prompt once in the foreground. Does **not** grant the exemption. |
 | `preventSleepWhileTracking` | `true` | Default when MDM applies. Partial wake lock while the foreground service runs. |
 
@@ -61,7 +62,7 @@ A JSON array is servers only. An object can also set identity and the lock (thos
 Compact paste (fake values):
 
 ```json
-{"settingsLock":"LOCKCODE","callsign":"%NUMBER%","team":"Cyan","role":"Team Member","servers":[{"host":"tak.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example"}]}
+{"settingsLock":"LOCKCODE","callsign":"%NUMBER%","team":"Cyan","role":"Team Member","allowTrackingPause":false,"servers":[{"host":"tak.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example"}]}
 ```
 
 Server fields: `host`, `port` (8089), `protocol` (`ssl` or `tcp`), `enrollPort` (8446), `username`, `password` or `token`, `name`, optional `allowInsecureTlsSoftAccept`.
@@ -70,7 +71,11 @@ Server fields: `host`, `port` (8089), `protocol` (`ssl` or `tcp`), `enrollPort` 
 
 `settingsLock` is hashed with the same Diagnostics lock. Each MDM sync re-applies it, so a user who unlocked locally is locked again. Omitting the field does not clear an existing lock. `settingsLockClear=true` clears it only when no lock code is also set.
 
-Locked devices cannot edit Servers, Identity, or Diagnostics. MDM enroll and tracking still run.
+While locked, Status, Servers, Identity, GPS, Reporting, Mesh SA, Startup, and Diagnostics stay visible, but every control is grayed out — including pause and resume. Logs, status, and companion links stay usable. Unlock under Diagnostics with the lock code. A lock pushed by MDM cannot be cleared on the device.
+
+If the lock is off, a value MDM actually set is labeled **Set by MDM** and cannot be changed. That includes the server list when `serversJson` or `serverHost` is set. Settings MDM did not send stay editable.
+
+On an MDM-managed device, pause is off unless `allowTrackingPause` is `true`. A leftover operator pause is cleared on the next sync. `pause=true` is a remote pause the operator cannot clear.
 
 ## Battery / keep-alive
 

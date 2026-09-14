@@ -33,7 +33,24 @@ object MdmSettingsApply {
         "allowInsecureTlsSoftAccept",
         "requestBatteryExemption",
         "preventSleepWhileTracking",
+        "allowTrackingPause",
     )
+
+    /** Keys that mean the server list is owned by MDM (add, remove, enable, enroll). */
+    val SERVER_KEYS: Set<String> = setOf(
+        "serversJson",
+        "serverHost",
+        "serverPort",
+        "serverProtocol",
+        "serverName",
+        "enrollPort",
+        "enrollUrl",
+        "username",
+        "password",
+        "token",
+    )
+
+    fun serversManaged(keys: Set<String>): Boolean = keys.any { it in SERVER_KEYS }
 
     /** Prefer `token`, then `password` (Headwind / Quick Connect alias). */
     fun credential(keys: Map<String, String>): String? {

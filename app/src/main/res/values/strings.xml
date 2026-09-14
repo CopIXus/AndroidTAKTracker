@@ -19,10 +19,12 @@
     <string name="restriction_reporting_strategy_title">Reporting strategy</string>
     <string name="restriction_defer_to_atak_title">Defer to ATAK</string>
     <string name="restriction_pause_title">Remote pause</string>
+    <string name="restriction_allow_pause_title">Allow operator pause</string>
+    <string name="restriction_allow_pause_desc">When the app is MDM-managed, pause is blocked unless this is true</string>
     <string name="restriction_servers_json_title">Servers JSON</string>
     <string name="restriction_servers_json_desc">JSON array or object of TAK servers, optional settingsLock, callsign, team, and role</string>
     <string name="restriction_settings_lock_title">Settings lock code</string>
-    <string name="restriction_settings_lock_desc">Locks local edits. Re-applied on every MDM sync.</string>
+    <string name="restriction_settings_lock_desc">Locks local edits, including pause. Screens stay visible but grayed out. Re-applied on every MDM sync.</string>
     <string name="restriction_settings_lock_clear_title">Clear settings lock</string>
     <string name="restriction_tls_soft_accept_title">TLS soft-accept</string>
     <string name="restriction_battery_prompt_title">Prompt battery exemption once</string>

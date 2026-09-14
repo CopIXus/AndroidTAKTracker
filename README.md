@@ -23,6 +23,22 @@ Package ID: `com.copix.androidtaktracker` (debug builds: `com.copix.androidtaktr
 
 The examples below use fake hosts (`tak.example.com`). Do not commit real TAK hosts, users, passwords, or enroll URLs.
 
+The shield at the top of this page is the app icon and the About screen mark. Empty pixels around the shield are transparent, not black.
+
+### How it works
+
+<p align="center">
+  <img src="docs/how-fleet-connects.png" alt="Headwind pushes serversJson to AndroidTAKTracker, which enrolls and sends PLI to each TAK stream" width="820" />
+</p>
+
+<p align="center">
+  <img src="docs/how-settings-lock.png" alt="Settings lock grays every control. Without the lock, MDM-set fields are labeled Set by MDM" width="820" />
+</p>
+
+<p align="center">
+  <img src="docs/how-pause-rules.png" alt="Pause is blocked on an MDM device unless allowTrackingPause is true" width="820" />
+</p>
+
 ### Headwind MDM
 
 Headwind **Application Settings** are not Android Enterprise restrictions. The tracker binds the Headwind agent (`com.hmdm.action.Connect`) and reads `queryAppPreference`. Adding keys in the console does nothing until the agent syncs and the tracker process starts.
@@ -55,14 +71,29 @@ Same key names in managed configuration (`RestrictionsManager` / `app_restrictio
 | `callsign` | `%NUMBER%` | Headwind device ID, `mdmDeviceId`, or a fixed string |
 | `team` | `Cyan` | Optional ATAK team color |
 | `role` | `Team Member` | Optional ATAK role |
-| `settingsLock` | `LOCKCODE` | Locks local edits to servers, identity, and diagnostics. Re-applied on every sync. |
+| `settingsLock` | `LOCKCODE` | Grays out every local setting, including pause. Screens stay readable. Re-applied on every sync. |
 | `settingsLockClear` | `true` | Clears the lock only when `settingsLock` is empty. A non-blank lock wins if both are set. |
 | `allowInsecureTlsSoftAccept` | `true` | Lab CAs only. Also a per-server flag inside `serversJson`. |
+| `allowTrackingPause` | `false` | MDM-managed devices cannot pause unless this is `true`. |
 | `requestBatteryExemption` | `true` | Whether the app asks once. Does **not** grant the exemption. |
 | `preventSleepWhileTracking` | `true` | Partial wake lock while the foreground service runs. Default when MDM applies. |
 | `enrollUrl` | `opentaktracker://enroll?host=…` | Optional single-field enroll. Do not embed a live token in a shared config. |
 
 `username` + `password` run the same Marti CSR enroll as Quick Connect. After a client cert is stored, later syncs do not re-enroll. The same host, port, and protocol is one connection — a duplicate in JSON or a second profile is updated, not opened twice. A different port is a different server.
+
+With the settings lock on, every settings screen stays readable but the controls are grayed out, including pause. With the lock off, a field MDM actually sent is labeled **Set by MDM** and cannot be edited — including the server list. Other fields stay editable.
+
+### Pause (`allowTrackingPause`)
+
+On a device managed by MDM, the operator cannot pause or resume tracking unless you set `allowTrackingPause` to `true`. The default is off. Unlocking the settings lock does not override that.
+
+| Value | What the operator can do |
+|---|---|
+| omitted or `false` | Pause and resume stay gray. A leftover operator pause is cleared on the next sync so tracking continues. |
+| `true` | The operator may pause, unless the settings lock is also on. |
+| `pause` = `true` | Remote pause from MDM. The operator cannot clear it on the phone. |
+
+Put it in the same `serversJson` object as the lock and servers, or as its own Application Setting.
 
 Callsign, team, and role are device-wide: one PLI identity, many TAK streams. If those fields are in both the JSON and flat attributes, the JSON wins.
 
@@ -77,6 +108,7 @@ Paste this as the value of `serversJson`. Replace the fake host, user, and passw
   "team": "Cyan",
   "role": "Team Member",
   "allowInsecureTlsSoftAccept": false,
+  "allowTrackingPause": false,
   "requestBatteryExemption": true,
   "preventSleepWhileTracking": true,
   "servers": [

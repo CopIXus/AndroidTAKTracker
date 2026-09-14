@@ -67,6 +67,12 @@
         android:restrictionType="string"
         android:defaultValue="false" />
     <restriction
+        android:key="allowTrackingPause"
+        android:title="@string/restriction_allow_pause_title"
+        android:description="@string/restriction_allow_pause_desc"
+        android:restrictionType="string"
+        android:defaultValue="false" />
+    <restriction
         android:key="serversJson"
         android:title="@string/restriction_servers_json_title"
         android:description="@string/restriction_servers_json_desc"

@@ -13,12 +13,13 @@
 # team               Cyan
 # role               Team Member
 # settingsLock       LOCKCODE
+# allowTrackingPause false
 #
 # Prefer one serversJson value when pushing more than one TAK server.
 # Flat serverHost is ignored when serversJson parses. %NUMBER% is expanded
 # by Headwind before the app reads the string.
 #
 # serversJson
-# {"settingsLock":"LOCKCODE","callsign":"%NUMBER%","team":"Cyan","role":"Team Member","allowInsecureTlsSoftAccept":false,"servers":[{"host":"tak.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example"},{"host":"tak2.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example2"}]}
+# {"settingsLock":"LOCKCODE","callsign":"%NUMBER%","team":"Cyan","role":"Team Member","allowTrackingPause":false,"allowInsecureTlsSoftAccept":false,"servers":[{"host":"tak.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example"},{"host":"tak2.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example2"}]}
 #
 # See docs/headwind-mdm.md

@@ -27,7 +27,7 @@ class MdmServersJsonTest {
         val doc = MdmServersJson.parse(
             """
             {"settingsLock":"LOCK","callsign":"%NUMBER%","team":"Cyan","role":"Team Member",
-             "allowInsecureTlsSoftAccept":true,"servers":[
+             "allowInsecureTlsSoftAccept":true,"allowTrackingPause":false,"servers":[
                {"host":"a.example.com","token":"T1"},
                {"host":"b.example.com","password":"T2","enrollPort":9446,"protocol":"tcp"}
              ]}
@@ -39,6 +39,7 @@ class MdmServersJsonTest {
         assertEquals("Cyan", doc.team)
         assertEquals("Team Member", doc.role)
         assertEquals(true, doc.allowInsecureTlsSoftAccept)
+        assertEquals(false, doc.allowTrackingPause)
         assertEquals(2, doc.servers.size)
         assertEquals("T1", doc.servers[0].secret())
         assertEquals(9446, doc.servers[1].enrollPort)

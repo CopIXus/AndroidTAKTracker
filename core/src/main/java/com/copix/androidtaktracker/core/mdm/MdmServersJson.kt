@@ -46,6 +46,8 @@ data class MdmServersDocument(
     val allowInsecureTlsSoftAccept: Boolean? = null,
     val requestBatteryExemption: Boolean? = null,
     val preventSleepWhileTracking: Boolean? = null,
+    /** When MDM is present, operator pause is off unless this is explicitly true. */
+    val allowTrackingPause: Boolean? = null,
 )
 
 object MdmServersJson {
@@ -87,6 +89,7 @@ object MdmServersJson {
             allowInsecureTlsSoftAccept = boolField(obj, "allowInsecureTlsSoftAccept"),
             requestBatteryExemption = boolField(obj, "requestBatteryExemption"),
             preventSleepWhileTracking = boolField(obj, "preventSleepWhileTracking"),
+            allowTrackingPause = boolField(obj, "allowTrackingPause"),
         )
     }
 

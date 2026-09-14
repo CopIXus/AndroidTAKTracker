@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.copix.androidtaktracker.BuildConfig
 import com.copix.androidtaktracker.R
+import com.copix.androidtaktracker.core.mdm.MdmSettingsApply
 import com.copix.androidtaktracker.core.reporting.GpsDuty
 import com.copix.androidtaktracker.core.tak.TakConnectionState
 import com.copix.androidtaktracker.host.TrackingHost
@@ -98,7 +99,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
     val config by host.config.collectAsState()
     val statuses by host.serverStatuses.collectAsState()
     val enrollFeedback by host.lastEnrollFeedback.collectAsState()
-    val unlocked by host.settingsUnlocked.collectAsState()
+    val gate = rememberEditGate(host)
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     var enrollText by remember { mutableStateOf("") }
@@ -110,8 +111,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
     var manualBusy by remember { mutableStateOf(false) }
     var localMessage by remember { mutableStateOf<String?>(null) }
     var localOk by remember { mutableStateOf(true) }
-    val managed = host.mdm.managedKeys.collectAsState().value
-    val editable = unlocked || !host.isSettingsLocked
+    val serversOn = gate.serversEnabled
 
     val softCertPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -135,8 +135,8 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Add TAK servers via QR, enrollment URL, SoftCert ZIP, or manual host. Fake hosts only in samples.")
-        if ("enrollUrl" in managed || "serverHost" in managed || "serversJson" in managed) ManagedBadge()
-        if (!editable) Blurb("Settings are locked — unlock under Diagnostics to edit.")
+        LockBanner(gate)
+        SetByMdm(gate.serversSetByMdm)
         banner?.let {
             Text(
                 it,
@@ -154,7 +154,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             checked = server.enabled,
-                            enabled = editable,
+                            enabled = serversOn,
                             onCheckedChange = { en ->
                                 host.saveConfig { c -> c.servers.find { it.id == server.id }?.enabled = en }
                             },
@@ -173,7 +173,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
-                    TextButton(enabled = editable, onClick = {
+                    TextButton(enabled = serversOn, onClick = {
                         host.saveConfig { c -> c.servers.removeAll { it.id == server.id } }
                     }) { Text("Remove") }
                 }
@@ -184,10 +184,10 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { enrollText = it },
             label = { Text("Enrollment URL or iTAK CSV") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "enrollUrl" !in managed && "serversJson" !in managed,
+            enabled = serversOn,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = editable && "enrollUrl" !in managed && "serversJson" !in managed, onClick = {
+            Button(enabled = serversOn, onClick = {
                 scope.launch {
                     val r = host.enroll(enrollText)
                     localMessage = r.message
@@ -195,8 +195,8 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                     if (r.success) enrollText = ""
                 }
             }) { Text("Apply") }
-            OutlinedButton(enabled = editable, onClick = onOpenQr) { Text("Scan QR") }
-            OutlinedButton(enabled = editable, onClick = { softCertPicker.launch("application/zip") }) { Text("Import SoftCert") }
+            OutlinedButton(enabled = serversOn, onClick = onOpenQr) { Text("Scan QR") }
+            OutlinedButton(enabled = serversOn, onClick = { softCertPicker.launch("application/zip") }) { Text("Import SoftCert") }
         }
         Blurb(
             "Manual server: enter host and port. With a username and password, WinTAKTracker-style " +
@@ -208,21 +208,21 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { manualHost = it },
             label = { Text("Manual host (tak.example.com)") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
+            enabled = serversOn,
         )
         OutlinedTextField(
             value = manualPort,
             onValueChange = { manualPort = it },
             label = { Text("Streaming (CoT) port") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
+            enabled = serversOn,
         )
         OutlinedTextField(
             value = manualUser,
             onValueChange = { manualUser = it },
             label = { Text("Username (optional — enables cert enrollment)") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
+            enabled = serversOn,
         )
         OutlinedTextField(
             value = manualPassword,
@@ -230,7 +230,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             label = { Text("Password") },
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
+            enabled = serversOn,
         )
         if (manualUser.isNotBlank()) {
             OutlinedTextField(
@@ -238,14 +238,14 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                 onValueChange = { manualEnrollPort = it },
                 label = { Text("Enrollment port") },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
+                enabled = serversOn,
             )
         }
         if (manualBusy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
         Button(
-            enabled = editable && "serverHost" !in managed && "serversJson" !in managed && manualHost.isNotBlank() && !manualBusy,
+            enabled = serversOn && manualHost.isNotBlank() && !manualBusy,
             onClick = {
                 if (manualUser.isNotBlank() && manualPassword.isNotBlank()) {
                     manualBusy = true
@@ -305,7 +305,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
 @Composable
 private fun IdentityScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
-    val managed = host.mdm.managedKeys.collectAsState().value
+    val gate = rememberEditGate(host)
     var callsign by remember(config.userIdentity.callsign) { mutableStateOf(config.userIdentity.callsign) }
     var team by remember(config.userIdentity.team) {
         mutableStateOf(config.userIdentity.team.ifBlank { config.deviceIdentity.team })
@@ -319,24 +319,33 @@ private fun IdentityScreen(host: TrackingHost) {
             "Android uses a single callsign (My callsign) for CoT — there is no separate device/computer " +
                 "callsign like WinTAKTracker. Portal pushes append .att automatically.",
         )
-        if ("callsign" in managed) ManagedBadge()
+        LockBanner(gate)
+        val callsignOn = gate.enabled("callsign")
+        val teamOn = gate.enabled("team")
+        val roleOn = gate.enabled("role")
+        val identityOwned = gate.setByMdm("callsign", "team", "role")
+        SetByMdm(gate.setByMdm("callsign"))
         OutlinedTextField(
             value = callsign,
             onValueChange = { callsign = it },
             label = { Text("My callsign") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = "callsign" !in managed,
+            enabled = callsignOn,
         )
-        EnumDropdown("Team", team, Teams, "team" !in managed) { team = it }
-        EnumDropdown("Role", role, Roles, "role" !in managed) { role = it }
+        SetByMdm(gate.setByMdm("team"))
+        EnumDropdown("Team", team, Teams, teamOn) { team = it }
+        SetByMdm(gate.setByMdm("role"))
+        EnumDropdown("Role", role, Roles, roleOn) { role = it }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.applyRemoteIdentityFromPortal,
+                enabled = !gate.locked && !identityOwned,
                 onCheckedChange = { v -> host.saveConfig { it.applyRemoteIdentityFromPortal = v } },
             )
-            Text("Apply callsign/team/role from Portal / device-profile sync")
+            SettingLabel("Apply callsign/team/role from Portal / device-profile sync", !gate.locked && !identityOwned)
         }
-        Button(onClick = {
+        if (identityOwned) Blurb("Identity is set by MDM.")
+        Button(enabled = callsignOn || teamOn || roleOn, onClick = {
             host.saveConfig {
                 val trimmed = callsign.trim()
                 it.userIdentity.callsign = trimmed
@@ -355,17 +364,20 @@ private fun IdentityScreen(host: TrackingHost) {
 @Composable
 private fun GpsScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
+    val gate = rememberEditGate(host)
     val fix by host.gps.fix.collectAsState()
     val gpsDuty by host.gps.duty.collectAsState()
     val ctx = LocalContext.current
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Fused location (GNSS/Wi‑Fi). Optional IP geolocation fallback via ipwho.is.")
+        LockBanner(gate)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.gps.adaptToMotion,
+                enabled = gate.enabled(),
                 onCheckedChange = { v -> host.saveConfig { it.gps.adaptToMotion = v } },
             )
-            Text("Adapt GPS to motion (saves battery)")
+            SettingLabel("Adapt GPS to motion (saves battery)", gate.enabled())
         }
         Blurb(
             "When still or walking slowly, GNSS steps down from high accuracy. A real move " +
@@ -375,14 +387,15 @@ private fun GpsScreen(host: TrackingHost) {
             "Source priority",
             config.gps.sourcePriority,
             listOf("FusedOnly", "FusedThenNetwork", "NetworkOnly"),
-            true,
+            gate.enabled(),
         ) { v -> host.saveConfig { it.gps.sourcePriority = v } }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.gps.enableNetworkFallback,
+                enabled = gate.enabled(),
                 onCheckedChange = { v -> host.saveConfig { it.gps.enableNetworkFallback = v } },
             )
-            Text("Network / IP fallback")
+            SettingLabel("Network / IP fallback", gate.enabled())
         }
         OutlinedTextField(
             value = config.gps.lastFixHoldSeconds.toString(),
@@ -391,6 +404,7 @@ private fun GpsScreen(host: TrackingHost) {
             },
             label = { Text("Last-fix hold (s)") },
             modifier = Modifier.fillMaxWidth(),
+            enabled = gate.enabled(),
         )
         Text("Current: ${fix?.let { "${it.latitude}, ${it.longitude} (${it.source})" } ?: "none"}")
         Text("GPS duty: ${gpsDutyLabel(gpsDuty, config.gps.adaptToMotion)}")
@@ -404,6 +418,7 @@ private fun GpsScreen(host: TrackingHost) {
 @Composable
 private fun ReportingScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
+    val gate = rememberEditGate(host)
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb(
             "Dynamic sends CoT less often when you are still or only shifting a few meters " +
@@ -411,11 +426,13 @@ private fun ReportingScreen(host: TrackingHost) {
                 "that CloudTAK / ATAK keep your icon on the map between sends. Low battery " +
                 "stretches Dynamic intervals; charging restores the normal cadence.",
         )
+        LockBanner(gate)
+        SetByMdm(gate.setByMdm("reportingStrategy"))
         EnumDropdown(
             "Strategy",
             config.reporting.strategy,
             listOf("Dynamic", "Constant"),
-            true,
+            gate.enabled("reportingStrategy"),
         ) { v -> host.saveConfig { it.reporting.strategy = v } }
         OutlinedTextField(
             value = config.reporting.constantIntervalSeconds.toString(),
@@ -424,6 +441,7 @@ private fun ReportingScreen(host: TrackingHost) {
             },
             label = { Text("Constant interval (s)") },
             modifier = Modifier.fillMaxWidth(),
+            enabled = gate.enabled(),
         )
         OutlinedTextField(
             value = config.reporting.reliableStationarySeconds.toString(),
@@ -432,19 +450,22 @@ private fun ReportingScreen(host: TrackingHost) {
             },
             label = { Text("Reliable stationary (s)") },
             modifier = Modifier.fillMaxWidth(),
+            enabled = gate.enabled(),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.reporting.includeDeviceNameInRemarks,
+                enabled = gate.enabled(),
                 onCheckedChange = { v -> host.saveConfig { it.reporting.includeDeviceNameInRemarks = v } },
             )
-            Text("Include device name in CoT remarks")
+            SettingLabel("Include device name in CoT remarks", gate.enabled())
         }
+        SetByMdm(gate.setByMdm("deferToAtak"))
         EnumDropdown(
             "Defer to ATAK",
             config.atak.deferToAtak,
             listOf("Off", "WhenRunning", "WhenHeardOnMesh"),
-            true,
+            gate.enabled("deferToAtak"),
         ) { v -> host.saveConfig { it.atak.deferToAtak = v } }
         Blurb("When ATAK is active, AndroidTAKTracker suppresses its own PLI to avoid duplicate markers.")
     }
@@ -454,24 +475,27 @@ private fun ReportingScreen(host: TrackingHost) {
 @Composable
 private fun MeshScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
+    val gate = rememberEditGate(host)
     var testMsg by remember { mutableStateOf<String?>(null) }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LockBanner(gate)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = config.meshSa.enabled,
+                enabled = gate.enabled(),
                 onCheckedChange = { v -> host.saveConfig { it.meshSa.enabled = v } },
             )
-            Text("Broadcast Mesh SA", modifier = Modifier.padding(start = 8.dp))
+            SettingLabel("Broadcast Mesh SA", gate.enabled(), Modifier.padding(start = 8.dp))
         }
         EnumDropdown(
             "Mode",
             config.meshSa.mode,
             listOf("Always", "OnlyWhenDisconnected"),
-            true,
+            gate.enabled(),
         ) { v -> host.saveConfig { it.meshSa.mode = v } }
         Text("Multicast ${config.meshSa.multicastAddress}:${config.meshSa.multicastPort}")
         Blurb("Many Wi‑Fi APs block multicast — test with a map client on the same LAN.")
-        OutlinedButton(onClick = {
+        OutlinedButton(enabled = gate.enabled(), onClick = {
             testMsg = if (host.sendTestMeshSa()) "Test Mesh SA sent."
             else "Send failed (enable Mesh SA / check Wi‑Fi multicast)."
         }) { Text("Send test Mesh SA now") }
@@ -499,21 +523,30 @@ private fun CompanionsScreen() {
 @Composable
 private fun StartupScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
+    val gate = rememberEditGate(host)
     val ctx = LocalContext.current
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LockBanner(gate)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = config.startup.startOnBoot,
+                enabled = gate.enabled(),
                 onCheckedChange = { v -> host.saveConfig { it.startup.startOnBoot = v } },
             )
-            Text("Start when phone boots", modifier = Modifier.padding(start = 8.dp))
+            SettingLabel("Start when phone boots", gate.enabled(), Modifier.padding(start = 8.dp))
         }
+        SetByMdm(gate.setByMdm("preventSleepWhileTracking"))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = config.startup.preventSleepWhileTracking,
+                enabled = gate.enabled("preventSleepWhileTracking"),
                 onCheckedChange = { v -> host.saveConfig { it.startup.preventSleepWhileTracking = v } },
             )
-            Text("Prevent sleep while tracking", modifier = Modifier.padding(start = 8.dp))
+            SettingLabel(
+                "Prevent sleep while tracking",
+                gate.enabled("preventSleepWhileTracking"),
+                Modifier.padding(start = 8.dp),
+            )
         }
         TextButton(onClick = {
             val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
@@ -536,13 +569,14 @@ private fun StartupScreen(host: TrackingHost) {
 private fun DiagnosticsScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     val unlocked by host.settingsUnlocked.collectAsState()
+    val gate = rememberEditGate(host)
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var lockPassword by remember { mutableStateOf("") }
     var lockMsg by remember { mutableStateOf<String?>(null) }
     var logText by remember { mutableStateOf("Loading logs…") }
     val logScroll = rememberScrollState()
-    val canEdit = unlocked || !host.isSettingsLocked
+    val lockOwnedByMdm = gate.setByMdm("settingsLock")
 
     fun refreshLogs() {
         scope.launch {
@@ -554,20 +588,22 @@ private fun DiagnosticsScreen(host: TrackingHost) {
     LaunchedEffect(Unit) { refreshLogs() }
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LockBanner(gate)
         EnumDropdown(
             "Log level",
             config.diagnostics.logLevel,
             listOf("Debug", "Information", "Warning", "Error"),
-            canEdit,
+            gate.enabled(),
         ) { v -> host.saveConfig { it.diagnostics.logLevel = v } }
         Blurb("Default is Error (quiet). Switch to Information or Debug before reproducing a connection problem.")
+        SetByMdm(gate.setByMdm("allowInsecureTlsSoftAccept"))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
                 checked = config.diagnostics.allowInsecureTlsSoftAccept,
-                enabled = canEdit,
+                enabled = gate.enabled("allowInsecureTlsSoftAccept"),
                 onCheckedChange = { v -> host.saveConfig { it.diagnostics.allowInsecureTlsSoftAccept = v } },
             )
-            Text("Allow insecure TLS soft-accept (lab only)")
+            SettingLabel("Allow insecure TLS soft-accept (lab only)", gate.enabled("allowInsecureTlsSoftAccept"))
         }
         Blurb("Device UID: ${config.deviceUid}")
         Blurb("ATAK installed: ${host.atak.installed.value} · running: ${host.atak.running.value}")
@@ -625,11 +661,14 @@ private fun DiagnosticsScreen(host: TrackingHost) {
         }) { Text("Export redacted status") }
 
         Text("Settings lock", fontWeight = FontWeight.SemiBold)
+        SetByMdm(lockOwnedByMdm)
+        if (lockOwnedByMdm) Blurb("The lock code is set by MDM and cannot be changed on the device.")
         OutlinedTextField(
             value = lockPassword,
             onValueChange = { lockPassword = it },
             label = { Text(if (host.isSettingsLocked && !unlocked) "Unlock password" else "New lock password") },
             modifier = Modifier.fillMaxWidth(),
+            enabled = host.isSettingsLocked && !unlocked || !lockOwnedByMdm,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (host.isSettingsLocked && !unlocked) {
@@ -639,7 +678,7 @@ private fun DiagnosticsScreen(host: TrackingHost) {
                         "Unlocked."
                     } else "Incorrect password."
                 }) { Text("Unlock") }
-            } else {
+            } else if (!lockOwnedByMdm) {
                 Button(onClick = {
                     host.setSettingsLock(lockPassword.takeIf { it.isNotBlank() })
                     lockPassword = ""
@@ -655,6 +694,7 @@ private fun UpdatesScreen(host: TrackingHost) {
     val config by host.config.collectAsState()
     val last by host.lastUpdate.collectAsState()
     val mdm by host.mdm.mdmPresent.collectAsState()
+    val gate = rememberEditGate(host)
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var installMsg by remember { mutableStateOf<String?>(null) }
@@ -687,7 +727,7 @@ private fun UpdatesScreen(host: TrackingHost) {
                 },
             ) { Text("Check for updates") }
             Button(
-                enabled = !busy && !mdm && last?.updateAvailable == true,
+                enabled = !busy && !mdm && !gate.locked && last?.updateAvailable == true,
                 onClick = {
                     busy = true
                     scope.launch {
@@ -774,13 +814,48 @@ private fun Chip(label: String, value: String) {
     FilterChip(selected = false, onClick = {}, label = { Text("$label: $value") })
 }
 
+private class EditGate(val locked: Boolean, val managed: Set<String>) {
+    fun enabled(vararg keys: String): Boolean = !locked && keys.none { it in managed }
+    fun setByMdm(vararg keys: String): Boolean = !locked && keys.any { it in managed }
+    val serversEnabled: Boolean get() = enabled(*MdmSettingsApply.SERVER_KEYS.toTypedArray())
+    val serversSetByMdm: Boolean get() = setByMdm(*MdmSettingsApply.SERVER_KEYS.toTypedArray())
+}
+
 @Composable
-private fun ManagedBadge() {
+private fun rememberEditGate(host: TrackingHost): EditGate {
+    val unlocked by host.settingsUnlocked.collectAsState()
+    val managed by host.mdm.managedKeys.collectAsState()
+    return EditGate(locked = host.isSettingsLocked && !unlocked, managed = managed)
+}
+
+@Composable
+private fun LockBanner(gate: EditGate) {
+    if (gate.locked) {
+        Blurb("Settings are locked. You can view them, but not change them. Unlock under Diagnostics.")
+    }
+}
+
+@Composable
+private fun SetByMdm(show: Boolean) {
+    if (!show) return
     Text(
-        "Managed by MDM",
+        "Set by MDM",
         color = MaterialTheme.colorScheme.primary,
         fontWeight = FontWeight.SemiBold,
         style = MaterialTheme.typography.labelLarge,
+    )
+}
+
+@Composable
+private fun SettingLabel(text: String, enabled: Boolean, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        modifier = modifier,
+        color = if (enabled) {
+            MaterialTheme.colorScheme.onSurface
+        } else {
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        },
     )
 }
 

@@ -26,6 +26,8 @@ import com.copix.androidtaktracker.core.cot.GpsFix
 import com.copix.androidtaktracker.core.cot.GpsSourceKind
 import com.copix.androidtaktracker.core.diagnostics.StatusExporter
 import com.copix.androidtaktracker.core.identity.IdentityResolver
+import com.copix.androidtaktracker.core.mdm.MdmSettingsApply
+import com.copix.androidtaktracker.core.mdm.OperatorPausePolicy
 import com.copix.androidtaktracker.core.mesh.MeshSaBroadcaster
 import com.copix.androidtaktracker.core.portal.DeviceProfileSync
 import com.copix.androidtaktracker.core.portal.ServerCertificateProvider
@@ -277,8 +279,10 @@ class TrackingHost private constructor(private val appContext: Context) {
         }
         // Deep-copy first: mutating the StateFlow-held data class in place + assigning an equal
         // reload is ignored by MutableStateFlow (equality), which left the callsign screen stuck.
+        val before = store.deepCopy(_config.value)
         val cfg = store.deepCopy(_config.value)
         mutate(cfg)
+        restoreMdmOwned(before, cfg)
         store.save(cfg)
         _config.value = ensureDeviceUid(store.deepCopy(cfg))
         applyLogLevel(_config.value)
@@ -292,12 +296,12 @@ class TrackingHost private constructor(private val appContext: Context) {
     }
 
     suspend fun enroll(input: String): EnrollmentApplyResult {
-        if (!_settingsUnlocked.value && isSettingsLocked) {
-            return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
-        }
+        rejectLocalServerEdit()?.let { return it }
+        val identity = snapshotIdentity()
         return enrollment.applyAsync(input, _config.value).also {
             _lastEnrollFeedback.value = it
             if (it.success) {
+                restoreIdentitySnapshot(identity)
                 store.save(_config.value)
                 _config.value = ensureDeviceUid(store.load())
                 applyRuntime()
@@ -314,12 +318,12 @@ class TrackingHost private constructor(private val appContext: Context) {
         streamPort: Int = 8089,
         enrollPort: Int = 8446,
     ): EnrollmentApplyResult {
-        if (!_settingsUnlocked.value && isSettingsLocked) {
-            return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
-        }
+        rejectLocalServerEdit()?.let { return it }
+        val identity = snapshotIdentity()
         return enrollment.enrollManual(host, username, password, _config.value, streamPort, enrollPort).also {
             _lastEnrollFeedback.value = it
             if (it.success) {
+                restoreIdentitySnapshot(identity)
                 store.save(_config.value)
                 _config.value = ensureDeviceUid(store.load())
                 applyRuntime()
@@ -329,12 +333,13 @@ class TrackingHost private constructor(private val appContext: Context) {
     }
 
     fun importSoftCertZip(bytes: ByteArray): EnrollmentApplyResult {
-        if (!_settingsUnlocked.value && isSettingsLocked) {
-            return EnrollmentApplyResult(false, "Settings are locked.").also { _lastEnrollFeedback.value = it }
-        }
+        rejectLocalServerEdit()?.let { return it }
+        val identity = snapshotIdentity()
         val r = enrollment.importSoftCertZip(bytes, _config.value)
         _lastEnrollFeedback.value = r
         if (r.success) {
+            restoreIdentitySnapshot(identity)
+            store.save(_config.value)
             _config.value = ensureDeviceUid(store.load())
             scope.launch { applyRuntime() }
             reporting.noteIdentityChanged()
@@ -349,7 +354,19 @@ class TrackingHost private constructor(private val appContext: Context) {
     fun readRecentLogs(maxBytes: Int = 64 * 1024): String =
         (log as AndroidLogger).readRecentText(maxBytes)
 
+    fun canOperatorPause(): Boolean = OperatorPausePolicy.allowed(
+        settingsLocked = isSettingsLocked,
+        settingsUnlocked = _settingsUnlocked.value,
+        mdmPresent = mdm.mdmPresent.value,
+        allowTrackingPause = mdm.allowOperatorPause.value,
+        remotePause = mdm.isRemotePauseRequested(),
+    )
+
     fun setPaused(value: Boolean) {
+        if (!canOperatorPause()) {
+            log.warn("Config", "Pause rejected — settings are locked, or MDM does not allow operator pause.")
+            return
+        }
         _paused.value = value
         syncGpsSampling()
         refreshDeviceState()
@@ -468,7 +485,11 @@ class TrackingHost private constructor(private val appContext: Context) {
         return ok
     }
 
-    fun setSettingsLock(password: String?) {
+    fun setSettingsLock(password: String?, fromMdm: Boolean = false) {
+        if (!fromMdm && "settingsLock" in mdm.managedKeys.value) {
+            log.warn("Config", "Settings lock is set by MDM — local change rejected.")
+            return
+        }
         if (password.isNullOrBlank()) {
             store.deleteSecret("settings-lock")
             _settingsUnlocked.value = true
@@ -492,8 +513,9 @@ class TrackingHost private constructor(private val appContext: Context) {
         val cfg = _config.value
         val result = mdm.applyManagedConfig(cfg)
         result.enrollResult?.let { _lastEnrollFeedback.value = it }
-        if (result.clearSettingsLock) setSettingsLock(null)
-        else if (!result.settingsLock.isNullOrBlank()) setSettingsLock(result.settingsLock)
+        if (result.clearSettingsLock) setSettingsLock(null, fromMdm = true)
+        else if (!result.settingsLock.isNullOrBlank()) setSettingsLock(result.settingsLock, fromMdm = true)
+        clearOperatorPauseIfForbidden()
         if (result.configChanged) {
             store.save(cfg)
             _config.value = ensureDeviceUid(store.load())
@@ -512,6 +534,85 @@ class TrackingHost private constructor(private val appContext: Context) {
         syncGpsSampling(forceRestart = true)
         tak.start(cfg)
         publishServerStatuses()
+    }
+
+    /** MDM-owned fields survive a local save so a grayed control cannot be written around. */
+    private fun restoreMdmOwned(before: AppConfig, cfg: AppConfig) {
+        val keys = mdm.managedKeys.value
+        if (MdmSettingsApply.serversManaged(keys)) {
+            cfg.servers.clear()
+            cfg.servers.addAll(before.servers)
+        }
+        if ("callsign" in keys) {
+            cfg.userIdentity.callsign = before.userIdentity.callsign
+            cfg.deviceIdentity.callsign = before.deviceIdentity.callsign
+        }
+        if ("team" in keys) {
+            cfg.userIdentity.team = before.userIdentity.team
+            cfg.deviceIdentity.team = before.deviceIdentity.team
+        }
+        if ("role" in keys) {
+            cfg.userIdentity.role = before.userIdentity.role
+            cfg.deviceIdentity.role = before.deviceIdentity.role
+        }
+        if ("reportingStrategy" in keys) cfg.reporting.strategy = before.reporting.strategy
+        if ("deferToAtak" in keys) cfg.atak.deferToAtak = before.atak.deferToAtak
+        if ("allowInsecureTlsSoftAccept" in keys) {
+            cfg.diagnostics.allowInsecureTlsSoftAccept = before.diagnostics.allowInsecureTlsSoftAccept
+        }
+        if ("preventSleepWhileTracking" in keys) {
+            cfg.startup.preventSleepWhileTracking = before.startup.preventSleepWhileTracking
+        }
+    }
+
+    private fun rejectLocalServerEdit(): EnrollmentApplyResult? {
+        val rejected = when {
+            !_settingsUnlocked.value && isSettingsLocked ->
+                EnrollmentApplyResult(false, "Settings are locked.")
+            MdmSettingsApply.serversManaged(mdm.managedKeys.value) ->
+                EnrollmentApplyResult(false, "Servers are set by MDM.")
+            else -> null
+        }
+        rejected?.let { _lastEnrollFeedback.value = it }
+        return rejected
+    }
+
+    private data class IdentitySnapshot(val callsign: String, val team: String, val role: String)
+
+    private fun snapshotIdentity(): IdentitySnapshot {
+        val cfg = _config.value
+        return IdentitySnapshot(
+            cfg.userIdentity.callsign,
+            cfg.userIdentity.team.ifBlank { cfg.deviceIdentity.team },
+            cfg.userIdentity.role.ifBlank { cfg.deviceIdentity.role },
+        )
+    }
+
+    private fun restoreIdentitySnapshot(snapshot: IdentitySnapshot) {
+        val keys = mdm.managedKeys.value
+        val cfg = _config.value
+        if ("callsign" in keys) {
+            cfg.userIdentity.callsign = snapshot.callsign
+            cfg.deviceIdentity.callsign = snapshot.callsign
+        }
+        if ("team" in keys) {
+            cfg.userIdentity.team = snapshot.team
+            cfg.deviceIdentity.team = snapshot.team
+        }
+        if ("role" in keys) {
+            cfg.userIdentity.role = snapshot.role
+            cfg.deviceIdentity.role = snapshot.role
+        }
+    }
+
+    private fun clearOperatorPauseIfForbidden() {
+        val mdmBlocksPause = mdm.mdmPresent.value && !mdm.allowOperatorPause.value
+        if (!mdmBlocksPause || !_paused.value) return
+        _paused.value = false
+        syncGpsSampling()
+        refreshDeviceState()
+        reporting.requestAsap()
+        log.info("MDM", "Cleared operator pause — MDM does not allow it.")
     }
 
     /**

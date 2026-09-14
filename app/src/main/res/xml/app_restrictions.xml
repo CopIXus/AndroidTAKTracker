@@ -66,4 +66,34 @@
         android:title="@string/restriction_pause_title"
         android:restrictionType="string"
         android:defaultValue="false" />
+    <restriction
+        android:key="serversJson"
+        android:title="@string/restriction_servers_json_title"
+        android:description="@string/restriction_servers_json_desc"
+        android:restrictionType="string" />
+    <restriction
+        android:key="settingsLock"
+        android:title="@string/restriction_settings_lock_title"
+        android:description="@string/restriction_settings_lock_desc"
+        android:restrictionType="string" />
+    <restriction
+        android:key="settingsLockClear"
+        android:title="@string/restriction_settings_lock_clear_title"
+        android:restrictionType="string"
+        android:defaultValue="false" />
+    <restriction
+        android:key="allowInsecureTlsSoftAccept"
+        android:title="@string/restriction_tls_soft_accept_title"
+        android:restrictionType="string"
+        android:defaultValue="false" />
+    <restriction
+        android:key="requestBatteryExemption"
+        android:title="@string/restriction_battery_prompt_title"
+        android:restrictionType="string"
+        android:defaultValue="true" />
+    <restriction
+        android:key="preventSleepWhileTracking"
+        android:title="@string/restriction_prevent_sleep_title"
+        android:restrictionType="string"
+        android:defaultValue="true" />
 </restrictions>

@@ -9,6 +9,8 @@ import android.os.Build
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ServerProfile
 import com.copix.androidtaktracker.core.identity.RemoteIdentityApply
+import com.copix.androidtaktracker.core.mdm.MdmServersDocument
+import com.copix.androidtaktracker.core.mdm.MdmServersJson
 import com.copix.androidtaktracker.core.mdm.MdmSettingsApply
 import com.copix.androidtaktracker.core.tak.EnrollmentApplyResult
 import com.copix.androidtaktracker.core.tak.EnrollmentService
@@ -21,6 +23,9 @@ import java.util.UUID
 data class MdmApplyResult(
     val configChanged: Boolean,
     val enrollResult: EnrollmentApplyResult? = null,
+    /** Non-blank lock code to hash and re-apply (re-locks a locally unlocked device). */
+    val settingsLock: String? = null,
+    val clearSettingsLock: Boolean = false,
 )
 
 /**
@@ -43,6 +48,10 @@ class MdmConfigBridge(
 
     private var pauseRequested = false
     fun isRemotePauseRequested(): Boolean = pauseRequested
+
+    private val _requestBatteryExemption = MutableStateFlow(true)
+    /** False only when MDM explicitly sets `requestBatteryExemption` to false. */
+    val requestBatteryExemption: StateFlow<Boolean> = _requestBatteryExemption
 
     fun isKeyManaged(key: String): Boolean = key in _managedKeys.value
 
@@ -197,10 +206,15 @@ class MdmConfigBridge(
         for ((k, v) in bundle) merged[k] = v
         for ((k, v) in hw) if (k !in merged) merged[k] = v
 
+        val document = MdmServersJson.parse(merged["serversJson"])
+        document.parseError?.let { log.warn("MDM", it) }
+        overlayJson(merged, document)
         val keys = MdmSettingsApply.normalize(merged, headwind.getDeviceId())
         _managedKeys.value = keys.keys.toSet()
         if (keys.isNotEmpty()) markPresent()
         if (keys.isEmpty()) return MdmApplyResult(false)
+        _requestBatteryExemption.value =
+            MdmServersJson.parseBool(keys["requestBatteryExemption"]) ?: true
 
         var changed = false
         var enrollResult: EnrollmentApplyResult? = null
@@ -216,42 +230,41 @@ class MdmConfigBridge(
         }
 
         val host = keys["serverHost"]
-        if (!host.isNullOrBlank() && enrollResult == null) {
-            val port = MdmSettingsApply.parsePort(keys["serverPort"], 8089)
-            val enrollPort = MdmSettingsApply.parsePort(keys["enrollPort"], 8446)
-            val protocol = keys["serverProtocol"] ?: "ssl"
-            val existing = config.servers.firstOrNull { it.host.equals(host, true) }
-            val user = keys["username"]
-            val secret = MdmSettingsApply.credential(keys)
-            when {
-                MdmSettingsApply.shouldEnroll(existing, user, secret) -> {
-                    enrollResult = enrollment.enrollManual(
-                        host = host,
-                        username = user!!,
-                        password = secret!!,
-                        config = config,
-                        streamPort = port,
-                        enrollPort = enrollPort,
-                    )
-                    if (enrollResult?.success == true) changed = true
-                    else log.warn("MDM", "Managed enroll failed: ${enrollResult?.message}")
-                }
-                existing == null -> {
-                    config.servers.add(
-                        ServerProfile(
-                            id = UUID.randomUUID().toString().replace("-", ""),
-                            displayName = keys["serverName"] ?: host,
-                            host = host,
-                            port = port,
-                            protocol = protocol,
-                            username = user,
-                        ),
-                    )
-                    changed = true
-                }
-                else -> {
-                    if (existing.port != port) { existing.port = port; changed = true }
-                    if (existing.protocol != protocol) { existing.protocol = protocol; changed = true }
+        val useFlatServer = !document.serversAuthoritative
+        if (useFlatServer && !host.isNullOrBlank() && enrollResult == null) {
+            val applied = applyOneServer(
+                config = config,
+                host = host,
+                port = MdmSettingsApply.parsePort(keys["serverPort"], 8089),
+                enrollPort = MdmSettingsApply.parsePort(keys["enrollPort"], 8446),
+                protocol = keys["serverProtocol"] ?: "ssl",
+                username = keys["username"],
+                secret = MdmSettingsApply.credential(keys),
+                displayName = keys["serverName"],
+                allowInsecureTls = MdmServersJson.parseBool(keys["allowInsecureTlsSoftAccept"]),
+            )
+            if (applied.changed) changed = true
+            applied.enrollResult?.let { enrollResult = it }
+        }
+        if (document.serversAuthoritative) {
+            for (spec in document.servers) {
+                val applied = applyOneServer(
+                    config = config,
+                    host = spec.host,
+                    port = spec.port,
+                    enrollPort = spec.enrollPort,
+                    protocol = spec.protocol,
+                    username = spec.username,
+                    secret = spec.secret(),
+                    displayName = spec.name,
+                    allowInsecureTls = spec.allowInsecureTlsSoftAccept
+                        ?: document.allowInsecureTlsSoftAccept
+                        ?: MdmServersJson.parseBool(keys["allowInsecureTlsSoftAccept"]),
+                )
+                if (applied.changed) changed = true
+                applied.enrollResult?.let { result ->
+                    val current = enrollResult
+                    if (current == null || !result.success || current.success) enrollResult = result
                 }
             }
         }
@@ -271,7 +284,105 @@ class MdmConfigBridge(
         keys["pause"]?.let {
             pauseRequested = it.equals("true", true) || it == "1"
         }
-        return MdmApplyResult(changed, enrollResult)
+
+        val tls = document.allowInsecureTlsSoftAccept
+            ?: MdmServersJson.parseBool(keys["allowInsecureTlsSoftAccept"])
+        if (tls != null && config.diagnostics.allowInsecureTlsSoftAccept != tls) {
+            config.diagnostics.allowInsecureTlsSoftAccept = tls
+            changed = true
+        }
+
+        val sleep = document.preventSleepWhileTracking
+            ?: MdmServersJson.parseBool(keys["preventSleepWhileTracking"])
+            ?: true
+        if (config.startup.preventSleepWhileTracking != sleep) {
+            config.startup.preventSleepWhileTracking = sleep
+            changed = true
+        }
+
+        val lock = keys["settingsLock"]?.trim()?.takeIf { it.isNotEmpty() }
+        // A non-blank lock wins if both are present so a template cannot accidentally clear it.
+        val clearLock = lock == null && (
+            document.settingsLockClear || MdmServersJson.parseBool(keys["settingsLockClear"]) == true
+            )
+        return MdmApplyResult(changed, enrollResult, settingsLock = lock, clearSettingsLock = clearLock)
+    }
+
+    /**
+     * JSON object fields win over flat Headwind attributes. Invalid JSON is left
+     * unapplied so the existing `serverHost` row still enrolls.
+     */
+    private fun overlayJson(keys: MutableMap<String, String>, document: MdmServersDocument) {
+        if (!document.parseError.isNullOrBlank() || !document.serversAuthoritative) return
+        document.callsign?.let { keys["callsign"] = it }
+        document.team?.let { keys["team"] = it }
+        document.role?.let { keys["role"] = it }
+        document.settingsLock?.let { keys["settingsLock"] = it }
+        if (document.settingsLockClear) keys["settingsLockClear"] = "true"
+        document.allowInsecureTlsSoftAccept?.let { keys["allowInsecureTlsSoftAccept"] = it.toString() }
+        document.requestBatteryExemption?.let { keys["requestBatteryExemption"] = it.toString() }
+        document.preventSleepWhileTracking?.let { keys["preventSleepWhileTracking"] = it.toString() }
+    }
+
+    private data class ServerApply(val changed: Boolean, val enrollResult: EnrollmentApplyResult? = null)
+
+    private suspend fun applyOneServer(
+        config: AppConfig,
+        host: String,
+        port: Int,
+        enrollPort: Int,
+        protocol: String,
+        username: String?,
+        secret: String?,
+        displayName: String?,
+        allowInsecureTls: Boolean?,
+    ): ServerApply {
+        val existing = config.servers.firstOrNull { it.host.equals(host, ignoreCase = true) }
+        val wantsTls = !protocol.equals("tcp", ignoreCase = true)
+        if (wantsTls && MdmSettingsApply.shouldEnroll(existing, username, secret)) {
+            val result = enrollment.enrollManual(
+                host = host,
+                username = username!!,
+                password = secret!!,
+                config = config,
+                streamPort = port,
+                enrollPort = enrollPort,
+            )
+            val profile = config.servers.firstOrNull { it.host.equals(host, ignoreCase = true) }
+            if (profile != null) {
+                if (!displayName.isNullOrBlank()) profile.displayName = displayName
+                if (allowInsecureTls != null) profile.allowInsecureTlsSoftAccept = allowInsecureTls
+            }
+            if (result.success) return ServerApply(true, result)
+            log.warn("MDM", "Managed enroll failed for $host: ${result.message}")
+            return ServerApply(profile != null, result)
+        }
+        if (existing == null) {
+            config.servers.add(
+                ServerProfile(
+                    id = UUID.randomUUID().toString().replace("-", ""),
+                    displayName = displayName ?: host,
+                    host = host,
+                    port = port,
+                    protocol = protocol,
+                    username = username,
+                    allowInsecureTlsSoftAccept = allowInsecureTls,
+                ),
+            )
+            return ServerApply(true)
+        }
+        var changed = false
+        if (existing.port != port) { existing.port = port; changed = true }
+        if (!existing.protocol.equals(protocol, ignoreCase = true)) { existing.protocol = protocol; changed = true }
+        if (!displayName.isNullOrBlank() && existing.displayName != displayName) {
+            existing.displayName = displayName
+            changed = true
+        }
+        if (allowInsecureTls != null && existing.allowInsecureTlsSoftAccept != allowInsecureTls) {
+            existing.allowInsecureTlsSoftAccept = allowInsecureTls
+            changed = true
+        }
+        return ServerApply(changed)
     }
 
     private fun readRestrictions(): Map<String, String> {

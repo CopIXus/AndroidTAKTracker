@@ -129,7 +129,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Add TAK servers via QR, enrollment URL, SoftCert ZIP, or manual host. Fake hosts only in samples.")
-        if ("enrollUrl" in managed || "serverHost" in managed) ManagedBadge()
+        if ("enrollUrl" in managed || "serverHost" in managed || "serversJson" in managed) ManagedBadge()
         if (!editable) Blurb("Settings are locked — unlock under Diagnostics to edit.")
         banner?.let {
             Text(
@@ -178,10 +178,10 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { enrollText = it },
             label = { Text("Enrollment URL or iTAK CSV") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "enrollUrl" !in managed,
+            enabled = editable && "enrollUrl" !in managed && "serversJson" !in managed,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = editable && "enrollUrl" !in managed, onClick = {
+            Button(enabled = editable && "enrollUrl" !in managed && "serversJson" !in managed, onClick = {
                 scope.launch {
                     val r = host.enroll(enrollText)
                     localMessage = r.message
@@ -202,21 +202,21 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { manualHost = it },
             label = { Text("Manual host (tak.example.com)") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         OutlinedTextField(
             value = manualPort,
             onValueChange = { manualPort = it },
             label = { Text("Streaming (CoT) port") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         OutlinedTextField(
             value = manualUser,
             onValueChange = { manualUser = it },
             label = { Text("Username (optional — enables cert enrollment)") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         OutlinedTextField(
             value = manualPassword,
@@ -224,7 +224,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             label = { Text("Password") },
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         if (manualUser.isNotBlank()) {
             OutlinedTextField(
@@ -232,14 +232,14 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                 onValueChange = { manualEnrollPort = it },
                 label = { Text("Enrollment port") },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = editable && "serverHost" !in managed,
+                enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
             )
         }
         if (manualBusy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
         Button(
-            enabled = editable && "serverHost" !in managed && manualHost.isNotBlank() && !manualBusy,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed && manualHost.isNotBlank() && !manualBusy,
             onClick = {
                 if (manualUser.isNotBlank() && manualPassword.isNotBlank()) {
                     manualBusy = true
@@ -508,7 +508,10 @@ private fun StartupScreen(host: TrackingHost) {
         TextButton(onClick = {
             ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
         }) { Text("Usage access (ATAK detection)") }
-        Blurb("On Headwind MDM fleets, prefer device-owner keep-alive / kiosk policies.")
+        Blurb(
+            "On Headwind MDM fleets, enable Autostart apps in foreground and keep-alive. " +
+                "Headwind cannot set battery Unrestricted; the tracker asks once in the foreground and still reports without it.",
+        )
     }
 }
 

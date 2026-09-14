@@ -249,6 +249,12 @@ class TrackingStatusMapperTest {
         val missing = TrackingStatusMapper.map(inputs(exempt = false, battery = 40, charging = true), now)
         assertTrue(missing.batteryWarning)
         assertEquals("Android may restrict background tracking", missing.batteryOptimizationLabel)
+        val mdm = TrackingStatusMapper.map(
+            inputs(exempt = false, battery = 40, charging = true).copy(mdmKeepAlive = true),
+            now,
+        )
+        assertFalse(mdm.batteryWarning)
+        assertEquals("Not exempt — MDM keep-alive still running", mdm.batteryOptimizationLabel)
         assertEquals("40% · Charging", missing.batteryLabel)
 
         val unknown = TrackingStatusMapper.map(inputs(exempt = null, battery = null), now)

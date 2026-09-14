@@ -51,6 +51,8 @@ data class StatusInputs(
     val charging: Boolean,
     /** null = platform did not tell us. */
     val batteryOptimizationExempt: Boolean?,
+    /** Headwind / MDM present — tracking continues via FGS keep-alive even if not exempt. */
+    val mdmKeepAlive: Boolean = false,
 )
 
 data class OperatorStatus(
@@ -116,12 +118,14 @@ object TrackingStatusMapper {
             lastLocationLabel = DurationFormat.age(inputs.fix?.timestamp?.toEpochMilli() ?: 0L, nowMs),
             lastReportLabel = DurationFormat.age(rep.lastPliEpochMs, nowMs),
             batteryLabel = batteryLabel(inputs.batteryPercent, inputs.charging),
-            batteryOptimizationLabel = when (inputs.batteryOptimizationExempt) {
-                true -> "Exempt"
-                false -> "Android may restrict background tracking"
-                null -> "Unknown"
+            batteryOptimizationLabel = when {
+                inputs.batteryOptimizationExempt == true -> "Exempt"
+                inputs.mdmKeepAlive && inputs.batteryOptimizationExempt == false ->
+                    "Not exempt — MDM keep-alive still running"
+                inputs.batteryOptimizationExempt == false -> "Android may restrict background tracking"
+                else -> "Unknown"
             },
-            batteryWarning = inputs.batteryOptimizationExempt == false,
+            batteryWarning = inputs.batteryOptimizationExempt == false && !inputs.mdmKeepAlive,
         )
     }
 

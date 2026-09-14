@@ -1,4 +1,8 @@
-﻿# AndroidTAKTracker
+﻿<p align="center">
+  <img src="docs/logo.png" alt="AndroidTAKTracker" width="220" />
+</p>
+
+# AndroidTAKTracker
 
 Tracking-only TAK PLI client for Android, by **CopIX LLC**. Sibling of [WinTAKTracker](https://github.com/CopIXus/WinTAKTracker).
 
@@ -6,10 +10,105 @@ Tracking-only TAK PLI client for Android, by **CopIX LLC**. Sibling of [WinTAKTr
 
 - Reports ATAK-shaped self-SA (PLI) to TAK Server over TLS/mTLS or cleartext TCP
 - Enrollment via QR / Portal deep links (`tak://`, `opentaktracker://`), Marti CSR, SoftCert ZIP
-- Headwind MDM Application Settings (binds the agent) + Android Enterprise managed configuration (precedence: MDM > Portal > local/QR). Operator recipe: [`docs/headwind-mdm.md`](docs/headwind-mdm.md).
+- Headwind MDM Application Settings (binds the agent) + Android Enterprise managed configuration (precedence: MDM > Portal > local/QR). Setup and a multi-server JSON example are below. Operator recipe: [`docs/headwind-mdm.md`](docs/headwind-mdm.md).
 - Boot-start foreground service, Mesh SA multicast, Portal callsign push (`.att` suffix)
 - Optional **Defer to ATAK** so phone + ATAK do not double-publish PLI
 - In-app GitHub Releases updater with CHANGELOG notes (disabled by default when MDM is present)
+
+## MDM setup
+
+Push servers, callsign, and a settings lock from an MDM so a fleet connects with no operator taps. Precedence is **MDM > Portal > local/QR**.
+
+Package ID: `com.copix.androidtaktracker` (debug builds: `com.copix.androidtaktracker.debug`). Ship the signed release APK. A debug build will not update a release install.
+
+The examples below use fake hosts (`tak.example.com`). Do not commit real TAK hosts, users, passwords, or enroll URLs.
+
+### Headwind MDM
+
+Headwind **Application Settings** are not Android Enterprise restrictions. The tracker binds the Headwind agent (`com.hmdm.action.Connect`) and reads `queryAppPreference`. Adding keys in the console does nothing until the agent syncs and the tracker process starts.
+
+1. QR-enroll Headwind as **Device Owner** (factory-reset phone). Without Device Owner the user must tap through install and runtime permissions.
+2. **Applications** → Add → upload `AndroidTAKTracker.apk`. Assign the configuration as **Install**, **Run after install**, and **Run at boot** (skip Run at boot if this app is already the kiosk content app).
+3. On the configuration, enable **Autostart apps in foreground**.
+4. Configuration → **Application settings**. Application = `com.copix.androidtaktracker`. Add one attribute per row (name = key, value = value).
+5. Prefer a single `serversJson` attribute when you have more than one TAK server. Flat `serverHost` is ignored while that JSON parses.
+
+Headwind expands `%NUMBER%`, `%DESCRIPTION%`, `%CUSTOM1%`–`%CUSTOM3%`, `%IMEI%`, and `%PHONE%` before the app sees the value, including inside `serversJson`. `%NUMBER%` or a blank/`mdmDeviceId` callsign becomes the Headwind device ID. The map label still gets `.att` so it does not collide with ATAK or WinTAKTracker.
+
+Keep-alive / restart if the process dies. Headwind cannot grant “App battery usage → Unrestricted”; the tracker asks once the first time it is in the foreground. Reporting does not depend on that Allow tap. Full notes: [`docs/headwind-mdm.md`](docs/headwind-mdm.md).
+
+### Android Enterprise (Intune and others)
+
+Same key names in managed configuration (`RestrictionsManager` / `app_restrictions.xml`). Put `serversJson` in one string restriction.
+
+### Attributes
+
+| Attribute | Example | Notes |
+|---|---|---|
+| `serversJson` | see below | One JSON value for multiple TAK servers, identity, and the settings lock. Wins over `serverHost` when it parses. |
+| `serverHost` | `tak.example.com` | Single-server fallback. Ignored when `serversJson` is valid. |
+| `serverPort` | `8089` | CoT stream port |
+| `serverProtocol` | `ssl` | `ssl` or `tcp` |
+| `enrollPort` | `8446` | Marti CSR port (default 8446) |
+| `username` | `USER` | TAK enroll user (HTTP Basic) |
+| `password` | `TOKEN` | TAK enroll password. `token` is an alias. |
+| `callsign` | `%NUMBER%` | Headwind device ID, `mdmDeviceId`, or a fixed string |
+| `team` | `Cyan` | Optional ATAK team color |
+| `role` | `Team Member` | Optional ATAK role |
+| `settingsLock` | `LOCKCODE` | Locks local edits to servers, identity, and diagnostics. Re-applied on every sync. |
+| `settingsLockClear` | `true` | Clears the lock only when `settingsLock` is empty. A non-blank lock wins if both are set. |
+| `allowInsecureTlsSoftAccept` | `true` | Lab CAs only. Also a per-server flag inside `serversJson`. |
+| `requestBatteryExemption` | `true` | Whether the app asks once. Does **not** grant the exemption. |
+| `preventSleepWhileTracking` | `true` | Partial wake lock while the foreground service runs. Default when MDM applies. |
+| `enrollUrl` | `opentaktracker://enroll?host=…` | Optional single-field enroll. Do not embed a live token in a shared config. |
+
+`username` + `password` run the same Marti CSR enroll as Quick Connect. After a client cert is stored, later syncs do not re-enroll. The same host, port, and protocol is one connection — a duplicate in JSON or a second profile is updated, not opened twice. A different port is a different server.
+
+Callsign, team, and role are device-wide: one PLI identity, many TAK streams. If those fields are in both the JSON and flat attributes, the JSON wins.
+
+### Demo JSON (multiple servers)
+
+Paste this as the value of `serversJson`. Replace the fake host, user, and password in your MDM console — do not commit the real values.
+
+```json
+{
+  "settingsLock": "LOCKCODE",
+  "callsign": "%NUMBER%",
+  "team": "Cyan",
+  "role": "Team Member",
+  "allowInsecureTlsSoftAccept": false,
+  "requestBatteryExemption": true,
+  "preventSleepWhileTracking": true,
+  "servers": [
+    {
+      "host": "tak.example.com",
+      "port": 8089,
+      "protocol": "ssl",
+      "enrollPort": 8446,
+      "username": "USER",
+      "password": "TOKEN",
+      "name": "Primary"
+    },
+    {
+      "host": "tak2.example.com",
+      "port": 8089,
+      "protocol": "ssl",
+      "enrollPort": 8446,
+      "username": "USER",
+      "password": "TOKEN",
+      "name": "Secondary"
+    }
+  ]
+}
+```
+
+An array (`[{"host":"tak.example.com", ...}]`) is servers only. An object can also set identity and the lock, as above.
+
+Server fields: `host`, `port` (8089), `protocol` (`ssl` or `tcp`), `enrollPort` (8446), `username`, `password` or `token`, `name` (or `displayName`), optional `allowInsecureTlsSoftAccept`.
+
+### Updates under MDM
+
+In-app GitHub Releases update is off when an MDM agent is present. Ship a new APK through Headwind **Applications** or your EMM.
 
 ## What it is not
 

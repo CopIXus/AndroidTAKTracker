@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -42,13 +44,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.copix.androidtaktracker.BuildConfig
+import com.copix.androidtaktracker.R
 import com.copix.androidtaktracker.core.reporting.GpsDuty
 import com.copix.androidtaktracker.core.tak.TakConnectionState
 import com.copix.androidtaktracker.host.TrackingHost
@@ -129,7 +135,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Add TAK servers via QR, enrollment URL, SoftCert ZIP, or manual host. Fake hosts only in samples.")
-        if ("enrollUrl" in managed || "serverHost" in managed) ManagedBadge()
+        if ("enrollUrl" in managed || "serverHost" in managed || "serversJson" in managed) ManagedBadge()
         if (!editable) Blurb("Settings are locked — unlock under Diagnostics to edit.")
         banner?.let {
             Text(
@@ -178,10 +184,10 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { enrollText = it },
             label = { Text("Enrollment URL or iTAK CSV") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "enrollUrl" !in managed,
+            enabled = editable && "enrollUrl" !in managed && "serversJson" !in managed,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = editable && "enrollUrl" !in managed, onClick = {
+            Button(enabled = editable && "enrollUrl" !in managed && "serversJson" !in managed, onClick = {
                 scope.launch {
                     val r = host.enroll(enrollText)
                     localMessage = r.message
@@ -202,21 +208,21 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             onValueChange = { manualHost = it },
             label = { Text("Manual host (tak.example.com)") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         OutlinedTextField(
             value = manualPort,
             onValueChange = { manualPort = it },
             label = { Text("Streaming (CoT) port") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         OutlinedTextField(
             value = manualUser,
             onValueChange = { manualUser = it },
             label = { Text("Username (optional — enables cert enrollment)") },
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         OutlinedTextField(
             value = manualPassword,
@@ -224,7 +230,7 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
             label = { Text("Password") },
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
-            enabled = editable && "serverHost" !in managed,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
         )
         if (manualUser.isNotBlank()) {
             OutlinedTextField(
@@ -232,14 +238,14 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                 onValueChange = { manualEnrollPort = it },
                 label = { Text("Enrollment port") },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = editable && "serverHost" !in managed,
+                enabled = editable && "serverHost" !in managed && "serversJson" !in managed,
             )
         }
         if (manualBusy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
         Button(
-            enabled = editable && "serverHost" !in managed && manualHost.isNotBlank() && !manualBusy,
+            enabled = editable && "serverHost" !in managed && "serversJson" !in managed && manualHost.isNotBlank() && !manualBusy,
             onClick = {
                 if (manualUser.isNotBlank() && manualPassword.isNotBlank()) {
                     manualBusy = true
@@ -267,20 +273,30 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                     localMessage = "Enter the password for certificate enrollment."
                     localOk = false
                 } else {
-                    host.saveConfig { c ->
-                        c.servers.add(
-                            com.copix.androidtaktracker.core.config.ServerProfile(
-                                id = java.util.UUID.randomUUID().toString().replace("-", ""),
-                                displayName = manualHost.trim(),
-                                host = manualHost.trim(),
-                                port = manualPort.toIntOrNull() ?: 8089,
-                                protocol = "ssl",
-                            ),
-                        )
+                    val hostName = manualHost.trim()
+                    val port = manualPort.toIntOrNull() ?: 8089
+                    val existing = com.copix.androidtaktracker.core.config.ServerStreams.find(
+                        config.servers, hostName, port, "ssl",
+                    )
+                    if (existing != null) {
+                        localMessage = "$hostName:$port is already configured."
+                        localOk = false
+                    } else {
+                        host.saveConfig { c ->
+                            c.servers.add(
+                                com.copix.androidtaktracker.core.config.ServerProfile(
+                                    id = java.util.UUID.randomUUID().toString().replace("-", ""),
+                                    displayName = hostName,
+                                    host = hostName,
+                                    port = port,
+                                    protocol = "ssl",
+                                ),
+                            )
+                        }
+                        manualHost = ""
+                        localMessage = "Server added (no certificate — enroll or import one for SSL)."
+                        localOk = true
                     }
-                    manualHost = ""
-                    localMessage = "Server added (no certificate — enroll or import one for SSL)."
-                    localOk = true
                 }
             },
         ) { Text(if (manualUser.isNotBlank()) "Enroll & add server" else "Add manual server") }
@@ -508,7 +524,10 @@ private fun StartupScreen(host: TrackingHost) {
         TextButton(onClick = {
             ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
         }) { Text("Usage access (ATAK detection)") }
-        Blurb("On Headwind MDM fleets, prefer device-owner keep-alive / kiosk policies.")
+        Blurb(
+            "On Headwind MDM fleets, enable Autostart apps in foreground and keep-alive. " +
+                "Headwind cannot set battery Unrestricted; the tracker asks once in the foreground and still reports without it.",
+        )
     }
 }
 
@@ -706,12 +725,32 @@ private fun UpdatesScreen(host: TrackingHost) {
 }
 @Composable
 private fun AboutScreen() {
-    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("AndroidTAKTracker", style = MaterialTheme.typography.headlineSmall)
-        Text("Version ${BuildConfig.VERSION_NAME}")
-        Text("CopIX LLC")
-        Text("AndroidTAKTracker Free Application License 1.0")
-        Blurb("Sibling of WinTAKTracker. Tracking-only — no COP, no built-in video.")
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.app_logo),
+            contentDescription = "AndroidTAKTracker",
+            modifier = Modifier
+                .padding(top = 8.dp)
+                .size(168.dp),
+            contentScale = ContentScale.Fit,
+        )
+        Text("AndroidTAKTracker", style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+        Text("Version ${BuildConfig.VERSION_NAME}", textAlign = TextAlign.Center)
+        Text("CopIX LLC", textAlign = TextAlign.Center)
+        Text("AndroidTAKTracker Free Application License 1.0", textAlign = TextAlign.Center)
+        Text(
+            "Sibling of WinTAKTracker. Tracking-only — no COP, no built-in video.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
         LinkButton("GitHub", "https://github.com/CopIXus/AndroidTAKTracker")
     }
 }

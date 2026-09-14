@@ -43,6 +43,7 @@ fun StatusScreen(host: TrackingHost, onNavigate: (SettingsSection) -> Unit) {
     val statuses by host.serverStatuses.collectAsState()
     val reporting by host.reportingSnapshot.collectAsState()
     val device by host.deviceState.collectAsState()
+    val mdmPresent by host.mdm.mdmPresent.collectAsState()
     val ctx = LocalContext.current
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -75,6 +76,7 @@ fun StatusScreen(host: TrackingHost, onNavigate: (SettingsSection) -> Unit) {
             batteryPercent = device.batteryPercent,
             charging = device.charging,
             batteryOptimizationExempt = device.batteryOptimizationExempt,
+            mdmKeepAlive = mdmPresent,
         ),
         nowMs = now,
     )

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Launcher icon and About screen use the AndroidTAKTracker shield mark
 - Dynamic CoT is driven by a displacement-anchored motion classifier: stationary (~180 s keepalive) after 30 s without relocating 20 m (60 s after driving), walking ~30–45 s, driving 5 s; GPS jitter while parked no longer looks like motion
 - Stationary → moving is the single displacement-driven ASAP trigger (immediate map refresh); identity / connect / altitude / speed-jump ASAP unchanged
 - Fused GPS power follows the same motion state: low/balanced while still or walking, high accuracy while driving or the moment we relocate — even when the fix carries no speed (can be turned off under GPS)
@@ -19,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- README MDM setup: Headwind and Android Enterprise attributes, plus a multi-server `serversJson` example
+- Headwind `serversJson` enrolls multiple TAK servers from one Application Setting (array or `{servers, settingsLock, callsign, team, role}`); flat `serverHost` still works when JSON is absent or invalid
+- MDM `settingsLock` re-applies the Diagnostics settings lock on every sync so operators cannot change servers or identity
+- One foreground prompt for the battery-optimization exemption under MDM (not on every boot). Status shows MDM keep-alive instead of the Fix prompt when the exemption is not granted
 - `ReportingSnapshot` / `DeviceState` runtime state and a pure `TrackingStatusMapper` (core) so the UI never reconstructs engine behaviour
 - Release pipeline: `vX.Y.Z` tags publish versioned releases with CHANGELOG notes alongside continuous `build-0.1.<run>` builds; every release ships a signed APK **and** a Play-ready AAB with SHA-256 files, runs unit tests first, and asserts v2 + v3 APK signatures; release builds fail loudly when signing is not configured instead of emitting an unsigned APK; R8 code/resource shrinking (names kept) trims the APK by roughly a third; `docs/release.md` covers keystore secrets, Play App Signing and Play Console declarations
 - Headwind MDM Application Settings bind (`com.hmdm.action.Connect`): `password` aliases `token`, Marti enroll via `enrollManual`, callsign from `%NUMBER%` / `mdmDeviceId` / device ID; skip first-run wizard when MDM granted tracking permissions

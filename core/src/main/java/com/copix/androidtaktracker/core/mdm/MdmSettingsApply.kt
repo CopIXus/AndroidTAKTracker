@@ -27,6 +27,12 @@ object MdmSettingsApply {
         "reportingStrategy",
         "deferToAtak",
         "pause",
+        "serversJson",
+        "settingsLock",
+        "settingsLockClear",
+        "allowInsecureTlsSoftAccept",
+        "requestBatteryExemption",
+        "preventSleepWhileTracking",
     )
 
     /** Prefer `token`, then `password` (Headwind / Quick Connect alias). */

@@ -1,7 +1,10 @@
 ﻿package com.copix.androidtaktracker
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -96,6 +99,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val requestBattery by host.mdm.requestBatteryExemption.collectAsState()
+                androidx.compose.runtime.LaunchedEffect(showOnboarding, mdmPresent, requestBattery) {
+                    if (showOnboarding || !mdmPresent || !requestBattery) return@LaunchedEffect
+                    maybePromptBatteryExemption(prefs)
+                }
+
                 androidx.compose.runtime.DisposableEffect(Unit) {
                     val listener = Consumer<Intent> { intent ->
                         intent.dataString?.let { uri ->
@@ -163,6 +172,27 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+    }
+
+    /**
+     * Ask once, only while this activity is in the foreground. A hidden tracker cannot
+     * show the system dialog from BOOT_COMPLETED on Android 10+, and repeating it
+     * every boot would steal a kiosk screen.
+     */
+    private fun maybePromptBatteryExemption(prefs: android.content.SharedPreferences) {
+        if (prefs.getBoolean(PREF_BATTERY_PROMPTED, false)) return
+        val pm = getSystemService(PowerManager::class.java)
+        val exempt = pm?.isIgnoringBatteryOptimizations(packageName) == true
+        prefs.edit().putBoolean(PREF_BATTERY_PROMPTED, true).apply()
+        if (exempt) return
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        runCatching { startActivity(intent) }
+    }
+
+    companion object {
+        private const val PREF_BATTERY_PROMPTED = "battery_exemption_prompted"
     }
 }
 

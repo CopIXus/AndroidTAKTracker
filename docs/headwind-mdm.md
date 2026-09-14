@@ -39,12 +39,52 @@ Use obvious fakes in examples — never put a real TAK host, user, or password i
 | `team` | `Cyan` | Optional ATAK team color |
 | `role` | `Team Member` | Optional ATAK role |
 | `enrollUrl` | `opentaktracker://enroll?host=…` | Optional single-field enroll (avoid embedding secrets) |
+| `serversJson` | see below | One JSON value for multiple TAK servers, identity, and the settings lock |
+| `settingsLock` | `LOCKCODE` | Locks local edits. Re-applied on every sync. Also accepted inside `serversJson`. |
+| `settingsLockClear` | `true` | Clears the lock only when `settingsLock` is empty. A non-blank lock wins if both are set. |
+| `allowInsecureTlsSoftAccept` | `true` | Lab CAs. Also a per-server flag inside `serversJson`. |
+| `requestBatteryExemption` | `true` | Prompt once in the foreground. Does **not** grant the exemption. |
+| `preventSleepWhileTracking` | `true` | Default when MDM applies. Partial wake lock while the foreground service runs. |
 
-Headwind substitutes `%NUMBER%` (device ID), `%DESCRIPTION%`, `%CUSTOM1%`–`%CUSTOM3%`, `%IMEI%`, `%PHONE%` on the server before the app sees the value.
+Headwind substitutes `%NUMBER%` (device ID), `%DESCRIPTION%`, `%CUSTOM1%`–`%CUSTOM3%`, `%IMEI%`, `%PHONE%` on the server before the app sees the value. That includes strings inside `serversJson`.
 
 If `callsign` is omitted, `mdmDeviceId`, or a leftover `%NUMBER%`, the app uses `HeadwindMDM` device ID from `queryConfig()`. Remote identity still appends `.att` so the map label does not collide with ATAK / WinTAKTracker.
 
 `username` + `password` run the same Marti CSR enroll as Quick Connect. After a client cert is stored, later syncs do not re-enroll.
+
+## Multiple servers (`serversJson`)
+
+When `serversJson` is present and valid it is the managed server set. Flat `serverHost` is ignored. Profiles already enrolled for the same host, port, and protocol are updated, not duplicated. A repeated host:port:protocol in the JSON is kept once. The connection layer also refuses a second socket to the same stream if a duplicate profile exists. Local/QR servers that are not in the JSON stay. Invalid JSON falls back to the flat `serverHost` row.
+
+A JSON array is servers only. An object can also set identity and the lock (those fields win over flat attributes when both are set). Callsign / team / role stay device-wide — one PLI identity, many TAK streams. The map label still gets `.att`.
+
+Compact paste (fake values):
+
+```json
+{"settingsLock":"LOCKCODE","callsign":"%NUMBER%","team":"Cyan","role":"Team Member","servers":[{"host":"tak.example.com","port":8089,"protocol":"ssl","enrollPort":8446,"username":"USER","password":"TOKEN","name":"Example"}]}
+```
+
+Server fields: `host`, `port` (8089), `protocol` (`ssl` or `tcp`), `enrollPort` (8446), `username`, `password` or `token`, `name`, optional `allowInsecureTlsSoftAccept`.
+
+## Settings lock
+
+`settingsLock` is hashed with the same Diagnostics lock. Each MDM sync re-applies it, so a user who unlocked locally is locked again. Omitting the field does not clear an existing lock. `settingsLockClear=true` clears it only when no lock code is also set.
+
+Locked devices cannot edit Servers, Identity, or Diagnostics. MDM enroll and tracking still run.
+
+## Battery / keep-alive
+
+Headwind cannot set Android “App battery usage → Unrestricted” ([Q&A](https://qa.h-mdm.com/18523/app-battery-usage)). Grant-all-permissions does not cover it. There is no Headwind MDM Settings toggle for this.
+
+The tracker prompts **once**, the first time it is in the foreground and not already exempt. It does not prompt on every reboot — a hidden app cannot start that dialog from `BOOT_COMPLETED` on Android 10+, and a repeating dialog would steal a kiosk screen.
+
+Reporting does not depend on the Allow tap. Use:
+
+- Applications: **Install**, **Run after install**, **Run at boot** (skip Run at boot if this app is already the kiosk content app)
+- Configuration: **Autostart apps in foreground** (otherwise Headwind hides the app after boot and the one-time prompt cannot appear)
+- Keep-alive / restart if the process dies
+
+Status then shows “Not exempt — MDM keep-alive still running” instead of the Fix-battery prompt. Optional: leave the tracker visible for one enroll so an admin can tap Allow, then hide it. If Headwind blocks Android Settings behind an admin password, the one-tap system dialog may still appear; kiosk “block other activities” can swallow it.
 
 ## First-run UI
 

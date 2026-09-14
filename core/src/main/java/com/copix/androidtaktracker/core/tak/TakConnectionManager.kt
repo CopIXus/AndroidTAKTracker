@@ -3,6 +3,7 @@ package com.copix.androidtaktracker.core.tak
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ConfigStore
 import com.copix.androidtaktracker.core.config.ServerProfile
+import com.copix.androidtaktracker.core.config.ServerStreams
 import com.copix.androidtaktracker.core.util.RedactedLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -65,15 +66,19 @@ class TakConnectionManager(
     val anyConnected: Boolean get() = statuses().any { it.state == TakConnectionState.CONNECTED }
     val anyReconnecting: Boolean get() = statuses().any { it.state == TakConnectionState.RECONNECTING }
 
-    fun statuses(): List<ServerConnectionStatus> = config.servers.map { p ->
-        val c = clients[p.id]
-        if (c != null) {
-            ServerConnectionStatus(
-                p.id, p.displayName, p.enabled, p.protocol, c.state, c.lastErrorCode, c.lastSendUtc,
-                autoReconnectSuspended = c.autoReconnectSuspended,
-            )
-        } else {
-            ServerConnectionStatus(p.id, p.displayName, p.enabled, p.protocol, TakConnectionState.DISCONNECTED)
+    fun statuses(): List<ServerConnectionStatus> {
+        val owners = ServerStreams.uniqueEnabled(config.servers)
+        return config.servers.map { p ->
+            val owner = owners.firstOrNull { ServerStreams.key(it) == ServerStreams.key(p) }
+            val c = clients[p.id] ?: owner?.id?.let { clients[it] }
+            if (c != null) {
+                ServerConnectionStatus(
+                    p.id, p.displayName, p.enabled, p.protocol, c.state, c.lastErrorCode, c.lastSendUtc,
+                    autoReconnectSuspended = c.autoReconnectSuspended,
+                )
+            } else {
+                ServerConnectionStatus(p.id, p.displayName, p.enabled, p.protocol, TakConnectionState.DISCONNECTED)
+            }
         }
     }
 
@@ -85,7 +90,12 @@ class TakConnectionManager(
     suspend fun reload(newConfig: AppConfig) {
         store.ensureDirectories()
         config = newConfig
-        val enabledIds = newConfig.servers.filter { it.enabled && it.host.isNotBlank() }.map { it.id }.toHashSet()
+        val connectable = ServerStreams.uniqueEnabled(newConfig.servers)
+        val skipped = newConfig.servers.count { it.enabled && it.host.isNotBlank() } - connectable.size
+        if (skipped > 0) {
+            log.warn("TAK", "Skipping $skipped duplicate server connection(s). Same host, port, and protocol share one stream.")
+        }
+        val enabledIds = connectable.map { it.id }.toHashSet()
 
         val toDispose = gate.withLock {
             val stale = clients.filterKeys { it !in enabledIds }
@@ -99,7 +109,7 @@ class TakConnectionManager(
 
         for (c in toDispose) c.disconnect(suppressAutoReconnect = true)
 
-        for (targetProfile in newConfig.servers.filter { it.id in enabledIds }) {
+        for (targetProfile in connectable) {
             val client = gate.withLock {
                 clients.getOrPut(targetProfile.id) {
                     val c = CotStreamClient(log, scope)

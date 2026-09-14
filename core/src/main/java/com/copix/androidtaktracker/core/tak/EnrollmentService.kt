@@ -3,6 +3,7 @@ package com.copix.androidtaktracker.core.tak
 import com.copix.androidtaktracker.core.config.AppConfig
 import com.copix.androidtaktracker.core.config.ConfigStore
 import com.copix.androidtaktracker.core.config.ServerProfile
+import com.copix.androidtaktracker.core.config.ServerStreams
 import com.copix.androidtaktracker.core.identity.RemoteIdentityApply
 import com.copix.androidtaktracker.core.util.RedactedLogger
 import kotlinx.coroutines.Dispatchers
@@ -58,18 +59,26 @@ class EnrollmentService(
                 EnrollmentApplyResult(r.success, r.message, r.profileId)
             }
             EnrollmentKind.ITAK_CSV -> {
-                val id = UUID.randomUUID().toString().replace("-", "")
-                config.servers.add(
-                    ServerProfile(
-                        id = id,
-                        displayName = parsed.displayName ?: parsed.host ?: "Server",
-                        host = parsed.host ?: "",
-                        port = parsed.port ?: 8089,
-                        protocol = parsed.protocol,
-                    ),
-                )
-                store.save(config)
-                EnrollmentApplyResult(true, "Added server ${parsed.host}", id)
+                val host = parsed.host ?: ""
+                val port = parsed.port ?: 8089
+                val protocol = parsed.protocol
+                val existing = ServerStreams.find(config.servers, host, port, protocol)
+                if (existing != null) {
+                    EnrollmentApplyResult(true, "Server $host:$port is already configured.", existing.id)
+                } else {
+                    val id = UUID.randomUUID().toString().replace("-", "")
+                    config.servers.add(
+                        ServerProfile(
+                            id = id,
+                            displayName = parsed.displayName ?: host.ifBlank { "Server" },
+                            host = host,
+                            port = port,
+                            protocol = protocol,
+                        ),
+                    )
+                    store.save(config)
+                    EnrollmentApplyResult(true, "Added server $host", id)
+                }
             }
             EnrollmentKind.OPEN_TAK_TRACKER_ENROLL, EnrollmentKind.TAK_ENROLL -> {
                 enrollWithToken(parsed, config)
@@ -192,28 +201,32 @@ class EnrollmentService(
         tokenBlob: String,
         built: MartiCertMaterial.PersistResult,
     ): EnrollmentApplyResult {
-        config.servers.add(
-            ServerProfile(
-                id = profileId,
-                displayName = host,
-                host = host,
-                port = parsed.port ?: 8089,
-                protocol = parsed.protocol.ifBlank { "ssl" },
-                username = user,
-                secretBlobName = tokenBlob,
-                clientCertFileName = built.clientCertFileName,
-                trustStoreFileName = built.trustStoreFileName,
-                certPasswordBlobName = built.certPasswordBlobName,
-                trustPasswordBlobName = built.trustPasswordBlobName,
-            ),
+        val port = parsed.port ?: 8089
+        val protocol = parsed.protocol.ifBlank { "ssl" }
+        val existing = ServerStreams.find(config.servers, host, port, protocol)
+        val profile = existing ?: ServerProfile(
+            id = profileId,
+            displayName = host,
+            host = host,
+            port = port,
+            protocol = protocol,
         )
+        if (existing == null) config.servers.add(profile)
+        else log.info("Enroll", "Updating existing profile for $host:$port instead of adding a second connection.")
+        profile.username = user
+        profile.secretBlobName = tokenBlob
+        profile.clientCertFileName = built.clientCertFileName
+        profile.trustStoreFileName = built.trustStoreFileName
+        profile.certPasswordBlobName = built.certPasswordBlobName
+        profile.trustPasswordBlobName = built.trustPasswordBlobName
+        if (profile.displayName.isBlank()) profile.displayName = host
         RemoteIdentityApply.apply(config, parsed.callsign, parsed.team, parsed.role)
         store.save(config)
         log.info("Enroll", "Marti CSR enrollment succeeded; client/trust PKCS12 persisted.")
         return EnrollmentApplyResult(
             true,
             "Certificate enrolled. Server profile ready for SSL CoT on port ${parsed.port ?: 8089}.",
-            profileId,
+            existing?.id ?: profileId,
         )
     }
 

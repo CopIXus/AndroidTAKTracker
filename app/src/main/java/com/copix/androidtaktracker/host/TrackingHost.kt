@@ -492,11 +492,16 @@ class TrackingHost private constructor(private val appContext: Context) {
         val cfg = _config.value
         val result = mdm.applyManagedConfig(cfg)
         result.enrollResult?.let { _lastEnrollFeedback.value = it }
+        if (result.clearSettingsLock) setSettingsLock(null)
+        else if (!result.settingsLock.isNullOrBlank()) setSettingsLock(result.settingsLock)
         if (result.configChanged) {
             store.save(cfg)
             _config.value = ensureDeviceUid(store.load())
             applyRuntime()
             reporting.noteIdentityChanged()
+        }
+        if (mdm.mdmPresent.value && isIgnoringBatteryOptimizations() == false) {
+            log.warn("MDM", "Battery optimization exemption not granted; foreground service and Headwind keep-alive still report.")
         }
     }
 

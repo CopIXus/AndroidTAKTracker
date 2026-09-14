@@ -19,7 +19,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
@@ -31,6 +36,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,6 +64,7 @@ import com.copix.androidtaktracker.R
 import com.copix.androidtaktracker.core.mdm.MdmSettingsApply
 import com.copix.androidtaktracker.core.reporting.GpsDuty
 import com.copix.androidtaktracker.core.tak.TakConnectionState
+import com.copix.androidtaktracker.ui.components.ManagedByMdmPill
 import com.copix.androidtaktracker.host.TrackingHost
 import com.copix.androidtaktracker.ui.SettingsSection
 import kotlinx.coroutines.Dispatchers
@@ -136,7 +143,6 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Blurb("Add TAK servers via QR, enrollment URL, SoftCert ZIP, or manual host. Fake hosts only in samples.")
         LockBanner(gate)
-        SetByMdm(gate.serversSetByMdm)
         banner?.let {
             Text(
                 it,
@@ -149,9 +155,15 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
         }
         config.servers.forEach { server ->
             val status = statuses[server.id]
+            val showName = server.displayName.isNotBlank() &&
+                !server.displayName.equals(server.host, ignoreCase = true) &&
+                !server.displayName.equals("Server", ignoreCase = true)
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    if (!gate.serversSetByMdm) {
                         Checkbox(
                             checked = server.enabled,
                             enabled = serversOn,
@@ -159,26 +171,58 @@ private fun ServersScreen(host: TrackingHost, onOpenQr: () -> Unit) {
                                 host.saveConfig { c -> c.servers.find { it.id == server.id }?.enabled = en }
                             },
                         )
-                        Column(Modifier.weight(1f)) {
+                    }
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .padding(top = 10.dp, end = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (showName) {
                             Text(server.displayName, fontWeight = FontWeight.SemiBold)
-                            Text("${server.host}:${server.port} (${server.protocol})", style = MaterialTheme.typography.bodySmall)
                         }
-                        Chip("Status", status?.state?.name ?: "—")
-                    }
-                    val err = status?.lastErrorCode?.takeIf { it.isNotBlank() }
-                    if (err != null && status.state != TakConnectionState.CONNECTED) {
                         Text(
-                            err,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodySmall,
+                            "${server.host}:${server.port} (${server.protocol})",
+                            style = MaterialTheme.typography.bodyMedium,
                         )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            ConnectionPill(status?.state)
+                            if (gate.serversSetByMdm) ManagedByMdmPill()
+                        }
+                        val err = status?.lastErrorCode?.takeIf { it.isNotBlank() }
+                        if (err != null && status.state != TakConnectionState.CONNECTED) {
+                            Text(
+                                err,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
-                    TextButton(enabled = serversOn, onClick = {
-                        host.saveConfig { c -> c.servers.removeAll { it.id == server.id } }
-                    }) { Text("Remove") }
+                    if (!gate.serversSetByMdm) {
+                        IconButton(
+                            enabled = serversOn,
+                            onClick = {
+                                host.saveConfig { c -> c.servers.removeAll { it.id == server.id } }
+                            },
+                        ) {
+                            Icon(
+                                Icons.Outlined.Delete,
+                                contentDescription = "Remove",
+                                tint = if (serversOn) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
+        if (gate.serversSetByMdm) ManagedByMdmPill()
         OutlinedTextField(
             value = enrollText,
             onValueChange = { enrollText = it },
@@ -344,7 +388,7 @@ private fun IdentityScreen(host: TrackingHost) {
             )
             SettingLabel("Apply callsign/team/role from Portal / device-profile sync", !gate.locked && !identityOwned)
         }
-        if (identityOwned) Blurb("Identity is set by MDM.")
+        if (identityOwned) ManagedByMdmPill()
         Button(enabled = callsignOn || teamOn || roleOn, onClick = {
             host.saveConfig {
                 val trimmed = callsign.trim()
@@ -662,7 +706,6 @@ private fun DiagnosticsScreen(host: TrackingHost) {
 
         Text("Settings lock", fontWeight = FontWeight.SemiBold)
         SetByMdm(lockOwnedByMdm)
-        if (lockOwnedByMdm) Blurb("The lock code is set by MDM and cannot be changed on the device.")
         OutlinedTextField(
             value = lockPassword,
             onValueChange = { lockPassword = it },
@@ -739,8 +782,9 @@ private fun UpdatesScreen(host: TrackingHost) {
         }
         installMsg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         // No background auto-update worker exists yet — a toggle here would be a dead setting.
+        if (mdm) ManagedByMdmPill()
         Blurb(
-            if (mdm) "Updates are MDM-managed on this device."
+            if (mdm) "Install updates from the MDM."
             else "Updates are manual: check above, then Download & install.",
         )
         val notes = last?.changelogNotes ?: last?.releaseNotes
@@ -816,7 +860,7 @@ private fun Chip(label: String, value: String) {
 
 private class EditGate(val locked: Boolean, val managed: Set<String>) {
     fun enabled(vararg keys: String): Boolean = !locked && keys.none { it in managed }
-    fun setByMdm(vararg keys: String): Boolean = !locked && keys.any { it in managed }
+    fun setByMdm(vararg keys: String): Boolean = keys.any { it in managed }
     val serversEnabled: Boolean get() = enabled(*MdmSettingsApply.SERVER_KEYS.toTypedArray())
     val serversSetByMdm: Boolean get() = setByMdm(*MdmSettingsApply.SERVER_KEYS.toTypedArray())
 }
@@ -837,13 +881,36 @@ private fun LockBanner(gate: EditGate) {
 
 @Composable
 private fun SetByMdm(show: Boolean) {
-    if (!show) return
-    Text(
-        "Set by MDM",
-        color = MaterialTheme.colorScheme.primary,
-        fontWeight = FontWeight.SemiBold,
-        style = MaterialTheme.typography.labelLarge,
-    )
+    if (show) ManagedByMdmPill()
+}
+
+@Composable
+private fun ConnectionPill(state: TakConnectionState?) {
+    val label = when (state) {
+        TakConnectionState.CONNECTED -> "Connected"
+        TakConnectionState.CONNECTING -> "Connecting"
+        TakConnectionState.RECONNECTING -> "Reconnecting"
+        TakConnectionState.ERROR -> "Error"
+        TakConnectionState.DISCONNECTED, null -> "Disconnected"
+    }
+    val (bg, fg) = when (state) {
+        TakConnectionState.CONNECTED ->
+            MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+        TakConnectionState.ERROR ->
+            MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
+        else ->
+            MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(shape = RoundedCornerShape(50), color = bg) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+            color = fg,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 14.sp,
+        )
+    }
 }
 
 @Composable

@@ -44,6 +44,7 @@ fun TrackingStatusCard(
     onTogglePause: () -> Unit,
     pauseEnabled: Boolean = true,
     pauseHint: String? = null,
+    managedByMdm: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -91,9 +92,14 @@ fun TrackingStatusCard(
             } else {
                 OutlinedButton(onClick = onTogglePause, enabled = pauseEnabled) { Text("Pause tracking") }
             }
-            if (!pauseHint.isNullOrBlank()) {
+            if (managedByMdm || !pauseHint.isNullOrBlank()) {
                 Spacer(Modifier.height(8.dp))
-                Text(pauseHint, style = MaterialTheme.typography.bodySmall, color = onContainer.copy(alpha = 0.8f))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (managedByMdm) ManagedByMdmPill()
+                    if (!pauseHint.isNullOrBlank()) {
+                        Text(pauseHint, style = MaterialTheme.typography.bodySmall, color = onContainer.copy(alpha = 0.8f))
+                    }
+                }
             }
         }
     }

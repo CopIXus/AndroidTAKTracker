@@ -87,17 +87,13 @@ fun StatusScreen(host: TrackingHost, onNavigate: (SettingsSection) -> Unit) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val effectivePaused = paused || remotePause
         val pauseEnabled = host.canOperatorPause()
-        val pauseHint = when {
-            remotePause -> "Paused by MDM"
-            mdmPresent && !allowPause -> "Pause is disabled by MDM"
-            host.isSettingsLocked && !unlocked -> "Settings are locked"
-            else -> null
-        }
+        val pauseHint = if (host.isSettingsLocked && !unlocked) "Settings are locked" else null
         TrackingStatusCard(
             status = status,
             paused = effectivePaused,
             pauseEnabled = pauseEnabled,
             pauseHint = pauseHint,
+            managedByMdm = remotePause || (mdmPresent && !allowPause),
             onTogglePause = { host.setPaused(!paused) },
         )
         TrackingIntelligenceCard(status)
